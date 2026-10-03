@@ -24,6 +24,15 @@
 //   SECTAZE   DrawTazer sub_826A8258, TazeWantTarget sub_826A8398
 //   SECZONE   patrol zone: EntityOfInterestIsInZone sub_826AF310, ReturnToPatrolZone sub_826AEE80
 //   AISTREAM  NPC blob stream functions sub_82C9B3A0 / sub_82C9B250 / sub_82C9B4F0
+//   PEDAUD    (named, 21 fields; 2026-10-03) the pedestrian audio instance state, read after the PedestrianSFX
+//             process sub_824D8078 (r3 = the object; active instances only):
+//             obj | S = [obj+32] | id S+64 | list index | list count | flags "+68 +69 +71 +80" (bytes) |
+//             feet "+73 +74" | model S+84 | model record key (u64 hex, *(0x830CFDDC) + (model + 14287) * 8) |
+//             S+96 | "S+88 S+92 S+120 S+124" | S+132 | S+136 | materials "S+140 S+144" | S+148 | S+152 | S+156 |
+//             O+128 (O = [obj+28]) | O+144 | O+48 x y z | listener *(0x830CFDD4)+0 x y z
+//             list = the packed 20-byte entries at [G+0x2F070+56], count [G+0x2F070+60], G = *(0x83083C38),
+//             matched by entry +12 == S+64 (-1 when not found). Per object at most every 500 ms, and at once
+//             when the id, +68 or +136 change. "-1" / "nan" where a read is not possible.
 #include "trace_common.h"
 
 using namespace skate3_research;
@@ -109,6 +118,66 @@ extern "C" REX_FUNC(sub_82E3D0D8) {
     Vec3Text(base, out, p, sizeof p);
     rex::audio_trace::line("PEDXYZ", "%08X\t%s", ped, p);
   }
+}
+namespace {
+struct PedAudLast {
+  uint64_t ms = 0;
+  uint32_t id = 0xFFFFFFFFu, speech = 0xFFFFFFFFu;
+  int on = -1;
+};
+std::mutex g_pedaud_mutex;
+std::unordered_map<uint32_t, PedAudLast> g_pedaud_last;
+}  // namespace
+extern "C" REX_FUNC(sub_824D8078) {
+  const uint32_t obj = ctx.r3.u32;
+  __imp__sub_824D8078(ctx, base);
+  if (!On("npc") || !Readable(base, obj, 36)) return;
+  const uint32_t owner16 = LoadU32(base, obj + 16);
+  if (!Readable(base, owner16, 53) || base[owner16 + 52] == 0) return;
+  const uint32_t s = LoadU32(base, obj + 32);
+  if (!Readable(base, s, 160)) return;
+  const uint32_t id = LoadU32(base, s + 64), speech = LoadU32(base, s + 136);
+  const int on = base[s + 68];
+  {
+    std::lock_guard<std::mutex> lock(g_pedaud_mutex);
+    PedAudLast& last = g_pedaud_last[obj];
+    const uint64_t now = GetTickCount64();
+    if (now - last.ms < 500 && id == last.id && speech == last.speech && on == last.on) return;
+    last.ms = now;
+    last.id = id;
+    last.speech = speech;
+    last.on = on;
+  }
+  // The living-world ped audio list: the 20-byte entries the manager sub_824F2890 copies from.
+  const uint32_t g = TryU32(base, 0x83083C38u, 0);
+  const uint32_t list = g ? g + 0x2F070u : 0;
+  const uint32_t entries = TryU32(base, list + 56, 0);
+  const uint32_t count = TryU32(base, list + 60, 0);
+  int index = -1;
+  if (entries && count <= 256 && Readable(base, entries, count * 20 + 4)) {
+    for (uint32_t i = 0; i < count; ++i) {
+      if (LoadU32(base, entries + i * 20 + 12) == id) {
+        index = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+  const uint32_t model = LoadU32(base, s + 84);
+  const uint32_t table = TryU32(base, 0x830CFDDCu, 0);
+  const uint64_t model_key = (table && model < 4096) ? TryU64(base, table + (model + 14287u) * 8u) : ~0ull;
+  const uint32_t o = LoadU32(base, obj + 28);
+  const bool o_ok = Readable(base, o, 148);
+  char pos[64], cam[64];
+  Vec3Text(base, o + 48, pos, sizeof pos);
+  Vec3Text(base, TryU32(base, 0x830CFDD4u, 0), cam, sizeof cam);
+  rex::audio_trace::line(
+      "PEDAUD", "%08X\t%08X\t%08X\t%d\t%u\t%u %u %u %u\t%u %u\t%u\t%016llX\t%u\t%u %u %u %u\t%u\t%u\t%u %u\t%.4f\t%.4f\t%.4f\t%.4f\t%d\t%s\t%s",
+      obj, s, id, index, count, base[s + 68], base[s + 69], base[s + 71], base[s + 80], base[s + 73], base[s + 74],
+      model, static_cast<unsigned long long>(model_key), LoadU32(base, s + 96), LoadU32(base, s + 88),
+      LoadU32(base, s + 92), LoadU32(base, s + 120), LoadU32(base, s + 124), LoadU32(base, s + 132), speech,
+      LoadU32(base, s + 140), LoadU32(base, s + 144), LoadF32(base, s + 148), LoadF32(base, s + 152),
+      LoadF32(base, s + 156), o_ok ? LoadF32(base, o + 128) : NAN,
+      o_ok ? static_cast<int>(LoadU32(base, o + 144)) : -1, pos, cam);
 }
 NPC_HOOK(8269F6A8, "NPCSPEED", "")
 NPC_HOOK(826C75A8, "NPCSTATE", "InterceptChasee\t")

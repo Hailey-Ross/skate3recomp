@@ -24,7 +24,8 @@
 //
 // Categories: SKATE3_TRACE=audio (events), dsp (GAIN/SEND per-voice lines, very many), dspmod (MOD) and
 // audiox (GRECX, FIRSTHIT, SKID, EMITSLOT: extra per-frame player and emitter detail; BAILLOCAL, BAILSTEP, BAILREG: the
-// ragdoll's per-region body impacts during the local player's bails; opt-in, see the end of the file).
+// ragdoll's per-region body impacts during the local player's bails; opt-in, see the end of the file; PLAYERPOST:
+// posts per Player sound instance, see below).
 
 #include "trace_common.h"
 
@@ -38,6 +39,55 @@ using namespace skate3_research;
 namespace {
 thread_local std::unordered_map<uint32_t, float> g_last_gain;  // Gain module -> last logged target
 thread_local std::unordered_map<uint32_t, float> g_last_send;  // Send object -> last logged target
+}  // namespace
+
+// PLAYERPOST (2026-10-03, category `audiox`, opt-in): which Player sound instance a post comes from. The per-player
+// SFX objects (SkateBoard, Contacts, Tricks, Wheels, Clothing, Treatments, OffBoard) exist once per Player instance
+// (the local rider and the one NPC skater within 30 m of the camera). Their process / update functions (vtable +32 /
+// +36 / +40) are wrapped so that the object being run is known on this thread; a POST (sub_828E2B48) or SPLC
+// (sub_82975700) made while one runs is logged with that object. The Wheels stream start / stop and the NPC bail grunt
+// helper are logged directly.
+//   PLAYERPOST <ms> <class> <via> <object> <local72> <local16> <mixmap key> <record id> <record index> <a> <b> <words>
+//              <caller chain>
+//     class: SkateBoard | Contacts | Tricks | Wheels | Clothing | Treatments | OffBoard.
+//     via: POST (a = class slot index, b = payload address, words = payload words 0..7),
+//          SPLC (a = bank index, b = id, words -),
+//          WSTART (Wheels sub_824CEAF0: a = layer, b = 1 if the layer's stream slot was filled by the call,
+//                  words = "id A, id B, level"),
+//          WSTOP (Wheels sub_824CEF60, logged only when the layer held a stream: a = layer, b = 0, words -),
+//          BAILGRUNT (Contacts helper sub_824BF5F8: a = 1 if local72 is 0 (the helper posts the speech message only
+//                     then), b = 0, words -).
+//     local72 = byte [[object+28]+72] (the record's local flag), local16 = byte [[object+16]+72]; -1 when unreadable.
+//     mixmap key = [[object+12]+4] (the object's MixMap controller key, hex). record = [object+28] (the CSTATE_Player
+//     record): +64 id, +68 skater index. 12 fields.
+namespace {
+struct PlayerCtx {
+  uint32_t obj;
+  const char* cls;
+};
+thread_local PlayerCtx g_player_ctx{0, nullptr};
+struct PlayerScope {
+  PlayerCtx saved;
+  PlayerScope(uint32_t obj, const char* cls) : saved(g_player_ctx) { g_player_ctx = PlayerCtx{obj, cls}; }
+  ~PlayerScope() { g_player_ctx = saved; }
+};
+int PlayerByte(uint8_t* base, uint32_t obj, uint32_t off) {
+  const uint32_t ref = TryU32(base, obj + off, 0);
+  return Readable(base, ref, 73) ? static_cast<int>(base[ref + 72]) : -1;
+}
+void PlayerPostLine(uint8_t* base, PPCContext& ctx, const char* cls, uint32_t obj, const char* via, int a,
+                    uint32_t b, const char* words) {
+  const uint32_t mix = TryU32(base, obj + 12, 0);
+  const uint32_t key = Plausible(mix) ? TryU32(base, mix + 4, 0) : 0;
+  const uint32_t rec = TryU32(base, obj + 28, 0);
+  const bool rec_ok = Readable(base, rec, 72);
+  char chain[64];
+  CallerChain(ctx, base, chain);
+  rex::audio_trace::line("PLAYERPOST", "%s\t%s\t%08X\t%d\t%d\t%08X\t%d\t%d\t%d\t%08X\t%s\t%s", cls, via, obj,
+                         PlayerByte(base, obj, 28), PlayerByte(base, obj, 16), key,
+                         rec_ok ? static_cast<int>(LoadU32(base, rec + 64)) : -1,
+                         rec_ok ? static_cast<int>(LoadU32(base, rec + 68)) : -1, a, b, words, chain);
+}
 }  // namespace
 
 extern "C" REX_FUNC(sub_82B32DC8) {
@@ -108,6 +158,8 @@ extern "C" REX_FUNC(sub_82975700) {
     CallerChain(ctx, base, chain);
     rex::audio_trace::line("SPLC", "%d\t%d\t%s", static_cast<int>(ctx.r4.s8), ctx.r5.s32, chain);
   }
+  if (g_player_ctx.obj != 0 && On("audiox"))
+    PlayerPostLine(base, ctx, g_player_ctx.cls, g_player_ctx.obj, "SPLC", static_cast<int>(ctx.r4.s8), ctx.r5.u32, "-");
   __imp__sub_82975700(ctx, base);
 }
 
@@ -232,6 +284,17 @@ extern "C" REX_FUNC(sub_828E2B48) {
     CallerChain(ctx, base, chain);
     const int object = static_cast<int>(ctx.r3.u32 - 0x8302EE28u) / 8;
     rex::audio_trace::line("POST", "%d\t0x%08X\t%s", object, ctx.r4.u32, chain);
+  }
+  if (g_player_ctx.obj != 0 && On("audiox")) {
+    char words[112] = "-";
+    const uint32_t p = ctx.r4.u32;
+    if (Readable(base, p, 32)) {
+      int n = 0;
+      for (int i = 0; i < 8; ++i)
+        n += std::snprintf(words + n, sizeof words - n, i ? " %d" : "%d", static_cast<int>(LoadU32(base, p + 4 * i)));
+    }
+    PlayerPostLine(base, ctx, g_player_ctx.cls, g_player_ctx.obj, "POST", static_cast<int>(ctx.r3.u32 - 0x8302EE28u) / 8,
+                   p, words);
   }
   __imp__sub_828E2B48(ctx, base);
 }
@@ -488,7 +551,10 @@ void FirstHit(uint8_t* base, uint32_t st) {
 }  // namespace
 extern "C" REX_FUNC(sub_824C6BD8) {
   const uint32_t owner = ctx.r3.u32;
-  __imp__sub_824C6BD8(ctx, base);
+  {
+    PlayerScope scope(owner, "SkateBoard");  // PLAYERPOST
+    __imp__sub_824C6BD8(ctx, base);
+  }
   const bool grec = On("audio"), grecx = On("audiox");
   if ((!grec && !grecx) || !Readable(base, owner, 1512)) return;
   const int b28 = LocalByte(base, owner, 28);
@@ -567,7 +633,10 @@ double SeamFrameMs() {
 }  // namespace
 extern "C" REX_FUNC(sub_824DD6F0) {
   const uint32_t obj = ctx.r3.u32;
-  __imp__sub_824DD6F0(ctx, base);
+  {
+    PlayerScope scope(obj, "Treatments");  // PLAYERPOST
+    __imp__sub_824DD6F0(ctx, base);
+  }
   if (!On("audio") || !Readable(base, obj, 36)) return;
   const uint32_t st = LoadU32(base, obj + 32);
   if (!Readable(base, st, 336)) return;
@@ -953,4 +1022,65 @@ extern "C" REX_FUNC(sub_82486EF0) {
                            pos, chain);
   }
   __imp__sub_82486EF0(ctx, base);
+}
+
+// PLAYERPOST wrappers (see the PLAYERPOST comment at the top): the per-player SFX objects' vtable process / update
+// functions, r3 = the object. Only the thread-local scope is set; nothing is read here. Vtables: SkateBoard 0x822FC770
+// (+36 sub_824C6A78; +40 = the GREC hook), Contacts 0x822FC698, Tricks 0x822FC7B8, Wheels 0x822FC848, Clothing
+// 0x822FCD10, Treatments 0x822FCDA0 (+40 = the TREAT hook), OffBoard 0x822FCF98.
+#define PLAYER_SCOPE_HOOK(addr, cls)                \
+  extern "C" REX_FUNC(sub_##addr) {                 \
+    PlayerScope scope(ctx.r3.u32, cls);             \
+    __imp__sub_##addr(ctx, base);                   \
+  }
+PLAYER_SCOPE_HOOK(824C6A78, "SkateBoard")
+PLAYER_SCOPE_HOOK(824B7F70, "Contacts")
+PLAYER_SCOPE_HOOK(824B8218, "Contacts")
+PLAYER_SCOPE_HOOK(824BE130, "Contacts")
+PLAYER_SCOPE_HOOK(824CBEB0, "Tricks")
+PLAYER_SCOPE_HOOK(824CBF78, "Tricks")
+PLAYER_SCOPE_HOOK(824CDC38, "Wheels")
+PLAYER_SCOPE_HOOK(824CDBF0, "Wheels")
+PLAYER_SCOPE_HOOK(824CDC70, "Wheels")
+PLAYER_SCOPE_HOOK(824DBAD0, "Clothing")
+PLAYER_SCOPE_HOOK(824DBB68, "Clothing")
+PLAYER_SCOPE_HOOK(824DCB98, "Clothing")
+PLAYER_SCOPE_HOOK(824DD408, "Treatments")
+PLAYER_SCOPE_HOOK(824E9118, "OffBoard")
+PLAYER_SCOPE_HOOK(824E9270, "OffBoard")
+PLAYER_SCOPE_HOOK(824E9628, "OffBoard")
+#undef PLAYER_SCOPE_HOOK
+
+// Wheels stream start (r4 layer, r5 / r6 the two stream ids, f1 level; starts only when the layer's slot
+// [object + 84 + 4 * layer] is empty) and stop (r4 layer).
+extern "C" REX_FUNC(sub_824CEAF0) {
+  const uint32_t obj = ctx.r3.u32;
+  const int layer = ctx.r4.s32;
+  const uint32_t id_a = ctx.r5.u32, id_b = ctx.r6.u32;
+  const double level = ctx.f1.f64;
+  const bool log = On("audiox") && layer >= 0 && layer < 3 && Readable(base, obj + 84, 12);
+  const uint32_t before = log ? LoadU32(base, obj + 84 + 4 * layer) : 0;
+  PPCContext entry = ctx;
+  __imp__sub_824CEAF0(ctx, base);
+  if (!log) return;
+  const uint32_t after = TryU32(base, obj + 84 + 4 * layer, 0);
+  char words[64];
+  std::snprintf(words, sizeof words, "%d %d %.4f", static_cast<int>(id_a), static_cast<int>(id_b), level);
+  PlayerPostLine(base, entry, "Wheels", obj, "WSTART", layer, (before == 0 && after != 0) ? 1u : 0u, words);
+}
+extern "C" REX_FUNC(sub_824CEF60) {
+  const uint32_t obj = ctx.r3.u32;
+  const int layer = ctx.r4.s32;
+  if (On("audiox") && layer >= 0 && layer < 3 && TryU32(base, obj + 84 + 4 * layer, 0) != 0)
+    PlayerPostLine(base, ctx, "Wheels", obj, "WSTOP", layer, 0, "-");
+  __imp__sub_824CEF60(ctx, base);
+}
+// NPC bail grunt: the body poster's helper (Contacts object in r3) posts message 8206 / 115 to the skater's
+// PlayerSpeech record only when [[object+28]+72] is 0.
+extern "C" REX_FUNC(sub_824BF5F8) {
+  if (On("audiox")) {
+    const int b28 = PlayerByte(base, ctx.r3.u32, 28);
+    PlayerPostLine(base, ctx, "Contacts", ctx.r3.u32, "BAILGRUNT", b28 == 0 ? 1 : 0, 0, "-");
+  }
+  __imp__sub_824BF5F8(ctx, base);
 }
