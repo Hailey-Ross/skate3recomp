@@ -22,7 +22,8 @@
 // the guest stack back-chain (saved LR at [frame - 8]), which names the gameplay function.
 // The player pointer joins PLAY and GAIN lines ([SndPlayer1+12] = player).
 //
-// Categories: SKATE3_TRACE=audio (events) and dsp (GAIN/SEND/MOD per-voice module lines, very many).
+// Categories: SKATE3_TRACE=audio (events), dsp (GAIN/SEND per-voice lines, very many), dspmod (MOD) and
+// audiox (GRECX, FIRSTHIT, SKID, EMITSLOT: extra per-frame player and emitter detail; opt-in, see the end of the file).
 
 #include "trace_common.h"
 
@@ -340,6 +341,9 @@ extern "C" REX_FUNC(sub_824A1A20) {
 //        +1152, +1156 | state [owner+36]: +204 turn input, +208 ground speed, +200 wheels, +332 air, +336 brake,
 //        +340 balance (hex words), +620 material of wheel 0
 namespace {
+// The local player's audio state ([owner+36] of the SkateBoard object GREC accepts), published for TREAT /
+// SEAMPAT / SEAMHIT as a second local-player test. Plain atomic, no lock.
+std::atomic<uint32_t> g_local_audio_state{0};
 void GrainPlayerText(uint8_t* base, uint32_t player, char* out, size_t n) {
   if (!Readable(base, player, 148)) {
     std::snprintf(out, n, "- - - -");
@@ -349,12 +353,77 @@ void GrainPlayerText(uint8_t* base, uint32_t player, char* out, size_t n) {
                 LoadF32(base, player + 12), static_cast<unsigned>(base[player + 144]));
 }
 }  // namespace
+// GRECX (2026-10-03, category `audiox`, opt-in): extra per-frame state from the same hook and the same
+// local-player test, as a separate kind so GREC's layout stays unchanged. 7 fields:
+//   GRECX <ms> <owner> <state +332 word, hex> <+232 slip f32> <+690 revert u8> <owner +1516 revert counter>
+//         <listener camera x y z> <listener view direction x y z>
+//   The +332 word holds the bytes +332 air, +333 / +334 push plant, +335 plant edge. The listener record is
+//   *(0x830CFDD4) (filled by sub_8248CC08): +0 camera position, +32 view direction. "nan nan nan" or -1
+//   when a read is not possible.
+namespace {
+void GrecExtra(uint8_t* base, uint32_t owner, uint32_t st) {
+  char cam[48], view[48];
+  const uint32_t listener = TryU32(base, 0x830CFDD4u, 0);
+  Vec3Text(base, listener, cam, sizeof cam);
+  Vec3Text(base, listener + 32, view, sizeof view);
+  const bool ok = Readable(base, st, 694);
+  rex::audio_trace::line("GRECX", "%08X\t%08X\t%.4f\t%d\t%d\t%s\t%s", owner, ok ? LoadU32(base, st + 332) : 0u,
+                         ok ? LoadF32(base, st + 232) : NAN, ok ? static_cast<int>(base[st + 690]) : -1,
+                         static_cast<int>(TryU32(base, owner + 1516, 0xFFFFFFFFu)), cam, view);
+}
+// FIRSTHIT (2026-10-03, category `audiox`, opt-in): the bail "first hit" gate, sampled once per GREC call (per
+// frame, local player). 6 fields:
+//   FIRSTHIT <ms> <B> <B+16 u8> <B+24 f32> <state +676 bail u8> <state +677 end u8> <why>
+//   B = *(*(0x83083C38) + 0x2FCB4) (lis -31992 / 15416, offset 0x2FCB4 as in sub_824BC188). The Contacts object
+//   latches the rising edge of B+16 (sub_824BCEB0: Contacts input 7 pulse, torso post); input 8 = B+24 x 32767.
+//   State = the GREC state [owner+36]. Logged when the byte, the float, +676 or +677 change, and as a 1 s
+//   heartbeat. why = bit mask: 1 byte, 2 float, 4 bail / end bytes, 8 heartbeat. B 0 / -1 / nan / -1 when a
+//   read is not possible.
+struct FirstHitLast {
+  uint32_t b = 0xFFFFFFFFu;
+  int b16 = -2;
+  uint32_t f24 = 0xFFFFFFFFu;  // raw bits, so NaN compares stable
+  int bail = -2, end = -2;
+  uint64_t ms = 0;
+};
+thread_local FirstHitLast g_firsthit;
+void FirstHit(uint8_t* base, uint32_t st) {
+  const uint32_t root = TryU32(base, 0x83083C38u, 0);
+  const uint32_t b = Plausible(root) ? TryU32(base, root + 0x2FCB4u, 0) : 0;
+  const bool b_ok = Readable(base, b, 28);
+  const int b16 = b_ok ? static_cast<int>(base[b + 16]) : -1;
+  const uint32_t f24 = b_ok ? LoadU32(base, b + 24) : 0x7FC00000u;
+  const bool st_ok = Readable(base, st, 678);
+  const int bail = st_ok ? static_cast<int>(base[st + 676]) : -1;
+  const int end = st_ok ? static_cast<int>(base[st + 677]) : -1;
+  const uint64_t now = GetTickCount64();
+  FirstHitLast& last = g_firsthit;
+  unsigned why = 0;
+  if (b16 != last.b16 || b != last.b) why |= 1;
+  if (f24 != last.f24) why |= 2;
+  if (bail != last.bail || end != last.end) why |= 4;
+  if (now - last.ms >= 1000) why |= 8;
+  if (why == 0) return;
+  last = {b, b16, f24, bail, end, now};
+  float f;
+  std::memcpy(&f, &f24, 4);
+  rex::audio_trace::line("FIRSTHIT", "%08X\t%d\t%.4f\t%d\t%d\t%u", b, b16, f, bail, end, why);
+}
+}  // namespace
 extern "C" REX_FUNC(sub_824C6BD8) {
   const uint32_t owner = ctx.r3.u32;
   __imp__sub_824C6BD8(ctx, base);
-  if (!On("audio") || !Readable(base, owner, 1512)) return;
+  const bool grec = On("audio"), grecx = On("audiox");
+  if ((!grec && !grecx) || !Readable(base, owner, 1512)) return;
   const uint32_t ctl = TryU32(base, owner + 16, 0);
   if (!ctl || TryU32(base, ctl + 72, 0) == 0) return;  // local player only
+  const uint32_t st = TryU32(base, owner + 36, 0);
+  if (Plausible(st)) g_local_audio_state.store(st, std::memory_order_relaxed);
+  if (grecx) {
+    GrecExtra(base, owner, st);
+    FirstHit(base, st);
+  }
+  if (!grec) return;
   char t[2][160];
   for (int i = 0; i < 2; ++i) {
     char a[64], b[64];
@@ -362,7 +431,6 @@ extern "C" REX_FUNC(sub_824C6BD8) {
     GrainPlayerText(base, LoadU32(base, owner + 1180 + 8 * i), b, sizeof b);
     std::snprintf(t[i], sizeof t[i], "%s | %s | %u", a, b, static_cast<unsigned>(base[owner + 1328 + i]));
   }
-  const uint32_t st = TryU32(base, owner + 36, 0);
   char s[160] = "-";
   if (Readable(base, st, 624)) {
     // +332 air is a byte (as in ASTATE); +336 brake / +340 balance widths unconfirmed -> whole words in hex.
@@ -375,4 +443,183 @@ extern "C" REX_FUNC(sub_824C6BD8) {
                          LoadF32(base, owner + 1508), LoadF32(base, owner + 1456), LoadF32(base, owner + 1464),
                          LoadF32(base, owner + 1028), LoadF32(base, owner + 1032), LoadF32(base, owner + 1152),
                          LoadF32(base, owner + 1156), s);
+}
+
+// TREAT / SEAMPAT / SEAMHIT (2026-10-02, specs from the audio port). Logged after the call for the local
+// player only, category `audio`. Each line ends with `<object> <local>`: local bit 1 = [[object+16]+72] != 0
+// (the GREC test), bit 2 = the object's state is the one GREC's local SkateBoard uses; logged when either is
+// set. Cheap and lock-free: a few guarded reads and one formatted line per call.
+//   TREAT <ms> <+236 f32> <+240 f32> <+260 f32> <+224 u8> <+332 u8> <+200 u32> <object> <local>
+//       Class_Treatment update sub_824DD6F0 (r3 = object), state [object+32]: air time, predicted time to
+//       landing, jump height, the +224 byte, in the air, wheels on the ground. 8 fields.
+//   SEAMPAT <ms> <+636 u32> <+648 u32> <+620 u32> <+208 f32> <frame ms> <wheel 0 xyz> <wheel 1 xyz>
+//           <wheel 2 xyz> <wheel 3 xyz> <object> <local>
+//       Class_Seams process sub_824C14C8 (r3 = object), state [object+32]: seam pattern of wheels 0 and 3,
+//       material of wheel 0, speed, host time since the previous local SEAMPAT line (the rendered-frame
+//       time; 0 on the first), wheel positions +384 + 16 w (three floats, space separated). 11 fields.
+//   SEAMHIT <ms> <wheel r4> <single r5 u8> <transition r6> <object> <local>
+//       Class_Seams hit sub_824C1DF8 (r3 = object). 5 fields.
+namespace {
+uint32_t LocalMask(uint8_t* base, uint32_t obj, uint32_t st) {
+  uint32_t mask = 0;
+  const uint32_t ctl = TryU32(base, obj + 16, 0);
+  if (Plausible(ctl) && TryU32(base, ctl + 72, 0) != 0) mask |= 1;
+  if (st != 0 && st == g_local_audio_state.load(std::memory_order_relaxed)) mask |= 2;
+  return mask;
+}
+std::atomic<int64_t> g_seampat_last_qpc{0};
+double SeamFrameMs() {
+  static const int64_t freq = [] {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return static_cast<int64_t>(f.QuadPart);
+  }();
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  const int64_t last = g_seampat_last_qpc.exchange(now.QuadPart, std::memory_order_relaxed);
+  return last == 0 ? 0.0 : static_cast<double>(now.QuadPart - last) * 1000.0 / static_cast<double>(freq);
+}
+}  // namespace
+extern "C" REX_FUNC(sub_824DD6F0) {
+  const uint32_t obj = ctx.r3.u32;
+  __imp__sub_824DD6F0(ctx, base);
+  if (!On("audio") || !Readable(base, obj, 36)) return;
+  const uint32_t st = LoadU32(base, obj + 32);
+  if (!Readable(base, st, 336)) return;
+  const uint32_t mask = LocalMask(base, obj, st);
+  if (mask == 0) return;
+  rex::audio_trace::line("TREAT", "%.4f\t%.4f\t%.4f\t%u\t%u\t%u\t%08X\t%u", LoadF32(base, st + 236),
+                         LoadF32(base, st + 240), LoadF32(base, st + 260), static_cast<unsigned>(base[st + 224]),
+                         static_cast<unsigned>(base[st + 332]), LoadU32(base, st + 200), obj, mask);
+}
+extern "C" REX_FUNC(sub_824C14C8) {
+  const uint32_t obj = ctx.r3.u32;
+  __imp__sub_824C14C8(ctx, base);
+  if (!On("audio") || !Readable(base, obj, 36)) return;
+  const uint32_t st = LoadU32(base, obj + 32);
+  if (!Readable(base, st, 652)) return;
+  const uint32_t mask = LocalMask(base, obj, st);
+  if (mask == 0) return;
+  char w[4][48];
+  for (int i = 0; i < 4; ++i) Vec3Text(base, st + 384 + 16 * i, w[i], sizeof w[i]);
+  rex::audio_trace::line("SEAMPAT", "%u\t%u\t%u\t%.4f\t%.3f\t%s\t%s\t%s\t%s\t%08X\t%u", LoadU32(base, st + 636),
+                         LoadU32(base, st + 648), LoadU32(base, st + 620), LoadF32(base, st + 208), SeamFrameMs(),
+                         w[0], w[1], w[2], w[3], obj, mask);
+}
+extern "C" REX_FUNC(sub_824C1DF8) {
+  const uint32_t obj = ctx.r3.u32;
+  const int wheel = ctx.r4.s32;
+  const unsigned single = ctx.r5.u32 & 0xFF;
+  const int transition = ctx.r6.s32;
+  if (On("audio") && Readable(base, obj, 36)) {
+    const uint32_t mask = LocalMask(base, obj, LoadU32(base, obj + 32));
+    if (mask != 0) rex::audio_trace::line("SEAMHIT", "%d\t%u\t%d\t%08X\t%u", wheel, single, transition, obj, mask);
+  }
+  __imp__sub_824C1DF8(ctx, base);
+}
+
+// SKID / EMITSLOT (2026-10-03, category `audiox`, opt-in). Logged after the call; a few guarded reads and one
+// formatted line per call, lock-free (both functions run on the game thread; their small memories are
+// thread_local).
+//   SKID <ms> <owner> <holder> <handle> <w0..w17> <+1516 revert counter> <state +232 slip f32> <state +690 u8>
+//       Class_wheels_skid updater sub_824C7A20 (r3 = the SFXObj_SkateBoard owner, local player only as GREC).
+//       Holder = owner +1288 (+0 sound handle, +4.. the 18 packet words, space separated, signed). Logged
+//       every call while a holder exists, plus one line when it goes away (holder 0, words "-"). 7 fields.
+//   EMITSLOT <ms> <object> <state> <info +0> <info +4> <info +8 level f32> <info +12> <info +16> <mixmap key>
+//            <handle> <w0..w8> <out0..out9>
+//       SFXObj_Emitter per-frame update sub_824DCF08 (r3 = object), for emitters whose state ([object+28])
+//       is active (+52 byte) on entry; at most one line per object per 100 ms. Info = tEmitterInfo
+//       [object+32] (+0 patch index, +4 != 0 = positional branch, +8 level, +12 == 1 = fixed pan, +16 pan).
+//       Mixmap key = [[object+12]+4] (the controller's key, 0x40060000 + g * 0x800). Handle and w0..w8 =
+//       the c_emitter packet at [object+40] (+0 handle, words at +4..+36: w1 = slot +8 dry, w2 = +12 send,
+//       w3 = +16 pan, w4 = +20 pitch, w5 = +24 low-pass). out0..out9 = the controller's raw output halves
+//       ([[object+12]+12], id n = half (n & 1 ? high : low) of word n / 2), 4 hex digits each. 11 fields.
+namespace {
+thread_local uint32_t g_skid_last_holder = 0;
+}  // namespace
+extern "C" REX_FUNC(sub_824C7A20) {
+  const uint32_t owner = ctx.r3.u32;
+  __imp__sub_824C7A20(ctx, base);
+  if (!On("audiox") || !Readable(base, owner, 1520)) return;
+  const uint32_t ctl = TryU32(base, owner + 16, 0);
+  if (!ctl || TryU32(base, ctl + 72, 0) == 0) return;  // local player only (the GREC test)
+  const uint32_t holder = LoadU32(base, owner + 1288);
+  if (holder == 0 && g_skid_last_holder == 0) return;
+  g_skid_last_holder = holder;
+  char words[18 * 12 + 2] = "-";
+  uint32_t handle = 0;
+  if (holder != 0 && Readable(base, holder, 76)) {
+    handle = LoadU32(base, holder);
+    int used = 0;
+    for (int i = 0; i < 18; ++i)
+      used += std::snprintf(words + used, sizeof words - used, "%s%d", i ? " " : "",
+                            static_cast<int>(LoadU32(base, holder + 4 + 4 * i)));
+  }
+  const uint32_t st = TryU32(base, owner + 36, 0);
+  const bool ok = Readable(base, st, 694);
+  rex::audio_trace::line("SKID", "%08X\t%08X\t%08X\t%s\t%d\t%.4f\t%d", owner, holder, handle, words,
+                         static_cast<int>(LoadU32(base, owner + 1516)), ok ? LoadF32(base, st + 232) : NAN,
+                         ok ? static_cast<int>(base[st + 690]) : -1);
+}
+
+namespace {
+struct EmitSeen {
+  uint32_t object = 0;
+  uint64_t ms = 0;
+};
+thread_local EmitSeen g_emit_seen[16];
+// True when `object` may log now (first sighting, or 100 ms since its last line); records the time.
+bool EmitDue(uint32_t object, uint64_t now) {
+  EmitSeen* oldest = &g_emit_seen[0];
+  for (EmitSeen& e : g_emit_seen) {
+    if (e.object == object) {
+      if (now - e.ms < 100) return false;
+      e.ms = now;
+      return true;
+    }
+    if (e.ms < oldest->ms) oldest = &e;
+  }
+  oldest->object = object;
+  oldest->ms = now;
+  return true;
+}
+}  // namespace
+extern "C" REX_FUNC(sub_824DCF08) {
+  const uint32_t obj = ctx.r3.u32;
+  bool active = false;
+  if (On("audiox") && Readable(base, obj, 48)) {
+    const uint32_t state = LoadU32(base, obj + 28);
+    active = Readable(base, state, 53) && base[state + 52] != 0;
+  }
+  __imp__sub_824DCF08(ctx, base);
+  if (!active || !Readable(base, obj, 48) || !EmitDue(obj, GetTickCount64())) return;
+  const uint32_t info = LoadU32(base, obj + 32);
+  const bool info_ok = Readable(base, info, 20);
+  const uint32_t mix = LoadU32(base, obj + 12);
+  const uint32_t key = TryU32(base, mix + 4, 0);
+  const uint32_t block = TryU32(base, mix + 12, 0);
+  const uint32_t holder = LoadU32(base, obj + 40);
+  char words[9 * 12 + 2] = "-";
+  uint32_t handle = 0;
+  if (Readable(base, holder, 40)) {
+    handle = LoadU32(base, holder);
+    int used = 0;
+    for (int i = 0; i < 9; ++i)
+      used += std::snprintf(words + used, sizeof words - used, "%s%d", i ? " " : "",
+                            static_cast<int>(LoadU32(base, holder + 4 + 4 * i)));
+  }
+  char outs[10 * 5 + 2] = "-";
+  if (Readable(base, block, 20)) {
+    int used = 0;
+    for (int id = 0; id < 10; ++id) {
+      const uint32_t w = LoadU32(base, block + 4 * (id >> 1));
+      used += std::snprintf(outs + used, sizeof outs - used, "%s%04X", id ? " " : "",
+                            static_cast<unsigned>((w >> ((id & 1) * 16)) & 0xFFFF));
+    }
+  }
+  rex::audio_trace::line("EMITSLOT", "%08X\t%08X\t%d\t%d\t%.4f\t%d\t%d\t%08X\t%08X\t%s\t%s", obj,
+                         LoadU32(base, obj + 28), info_ok ? static_cast<int>(LoadU32(base, info)) : -1,
+                         info_ok ? static_cast<int>(LoadU32(base, info + 4)) : -1,
+                         info_ok ? LoadF32(base, info + 8) : NAN, info_ok ? static_cast<int>(LoadU32(base, info + 12)) : -1,
+                         info_ok ? static_cast<int>(LoadU32(base, info + 16)) : -1, key, handle, words, outs);
 }

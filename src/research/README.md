@@ -14,7 +14,7 @@ hooks reference functions only by address and read fields by offset.
 | File | Category (`SKATE3_TRACE`) | What it logs |
 |---|---|---|
 | `trace_common.h` | — | guarded reads, caller chains, the category gate, `FIRST_PASS_HOOK` |
-| `hooks_audio.cpp` | `audio`, `dsp`, `dspmod` | sounds posted/played (POST, PLAY, SPLC), board contacts (CONTACT, CSET), audio state (ASTATE), the rolling grain bed (GREC), world-painter audio regions (WP\*) and ambience (AMB\*); `dsp`: voice gains and sends (GAIN, SEND); `dspmod`: per-voice DSP module values (MOD: pitch, filters) |
+| `hooks_audio.cpp` | `audio`, `audiox`, `dsp`, `dspmod` | sounds posted/played (POST, PLAY, SPLC), board contacts (CONTACT, CSET), audio state (ASTATE), the rolling grain bed (GREC), treatment state (TREAT), seam patterns and hits (SEAMPAT, SEAMHIT), world-painter audio regions (WP\*) and ambience (AMB\*); `dsp`: voice gains and sends (GAIN, SEND); `dspmod`: per-voice DSP module values (MOD: pitch, filters); `audiox`: extra per-frame detail, the board state word, slip, revert and listener position (GRECX), the bail first-hit flag and its strength on change plus once a second (FIRSTHIT), the held wheel-skid packet (SKID) and each active world emitter's parameter slots (EMITSLOT) |
 | `hooks_physics.cpp` | `physics`, `aiskater` | ground jump and board contact internals; `aiskater`: every skater's board (player and NPC skaters): contacts, contact point, velocity (SKATEB, SKATER) |
 | `hooks_world.cpp` | `world` | trigger volumes (stream-in, registration, enter/exit), teleports, world-painter key changes |
 | `hooks_npc.cpp` | `npc` | pedestrian/vehicle population, mood reactions (MOODOUT), named per-pedestrian timers (PEDTIMER), chases, takedowns, tazers, positions (PEDXYZ, PEDSEE) |
@@ -32,7 +32,7 @@ Environment variables (all optional; nothing is traced unless `SKATE3_AUDIO_TRAC
 | Variable | Meaning |
 |---|---|
 | `SKATE3_AUDIO_TRACE_FILE` | output file (tab-separated, one event per line: `KIND <ms> fields…`) |
-| `SKATE3_TRACE` | comma list of categories to log (unset = all), e.g. `audio,dsp,npc,world,traffic,aiskater` |
+| `SKATE3_TRACE` | comma list of categories to log (unset = all), e.g. `audio,dsp,npc,world,traffic,aiskater`; `audiox` adds several hundred lines a second while skating, so name it only for runs that need it |
 | `SKATE3_AUDIO_CAPTURE` | also record the mixed game output (stereo float32, 48 kHz); `CAPTURE` lines align it with the trace |
 | `SKATE3_WATCH` | watch-list file for `hooks_watch.cpp` |
 | `SKATE3_INPUT_SCRIPT` | play a pad input script (timed steps; see `input_script.h` in the patch) |
