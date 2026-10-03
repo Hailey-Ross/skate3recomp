@@ -46,7 +46,7 @@ one file.
 | Which sounds play for an action, and when | `audio` |
 | How loud each voice is, and where it is sent | `audio,dsp` |
 | Pitch and filter values per voice | `audio,dsp,dspmod` (heaviest) |
-| Board state, skids, bail first hit, emitter slots per frame | `audio,audiox` |
+| Board state, skids, bail first hit, emitter slots per frame, body impacts during bails | `audio,audiox` |
 | Board contacts of every skater, player and NPC | `physics,aiskater` |
 | Trigger volumes, teleports, world-painter keys | `world` |
 | Pedestrians, moods, chases | `npc` |
