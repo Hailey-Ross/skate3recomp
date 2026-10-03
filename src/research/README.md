@@ -48,6 +48,9 @@ Each file's header comment documents its line kinds and fields.
 
 ## Using it
 
+A step-by-step guide (first trace, choosing categories, reading and checking a trace, watch lists, input scripts,
+audio capture) is in [USAGE.md](USAGE.md). The reference:
+
 Environment variables (all optional; nothing is traced unless `SKATE3_AUDIO_TRACE_FILE` is set):
 
 | Variable | Meaning |
