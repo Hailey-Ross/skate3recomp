@@ -336,7 +336,8 @@ extern "C" REX_FUNC(sub_824A1A20) {
 // GREC (2026-10-02, spec from the audio port): the granular rolling bed's per-frame state, to settle the
 // bed gain on a straight roll (gain A / (1 - max(I, Bk)) = level(1)) and the carve / manual layer questions.
 // SFXObj_SkateBoard update sub_824C6BD8 (r3 = owner), logged after the call for the local player only
-// ([owner+16]+72 != 0), once per call (per frame). Category `audio`.
+// (byte [[owner+28]+72] != 0, local72; before 2026-10-03 the word at [[owner+16]+72], which also let an NPC skater's
+// board through), once per call (per frame). Category `audio`.
 //   GREC <ms> owner | truck0: A gain pitch pos active, B gain pitch pos active, running | truck1: same |
 //        owner +1160 turn intensity, +1164, +1168 brake slew, +1508 downhill, +1456, +1464, +1028, +1032,
 //        +1152, +1156 | state [owner+36]: +204 turn input, +208 ground speed, +200 wheels, +332 air, +336 brake,
@@ -356,6 +357,42 @@ void NoteGrecState(uint32_t owner, uint32_t st) {
   }
   static std::atomic<uint32_t> next{0};  // all slots used (states change on reloads): replace the oldest
   g_grec_states[next.fetch_add(1, std::memory_order_relaxed) % 4].store(v, std::memory_order_relaxed);
+}
+// Local-rider test (2026-10-03): the byte at [[object+28]+72], as COLLPOST's local72 and as the game's own eqchain,
+// grain-chain and trick code read it. The first hooks read the WORD at [[object+16]+72] instead, which also passed
+// for an NPC skater's objects once one spawned, so GREC / GRECX / FIRSTHIT / SKID / TREAT / SEAMPAT / SEAMHIT
+// alternated between two owners. -1 when the byte is not readable.
+int LocalByte(uint8_t* base, uint32_t obj, uint32_t off) {
+  const uint32_t ref = TryU32(base, obj + off, 0);
+  return Readable(base, ref, 73) ? static_cast<int>(base[ref + 72]) : -1;
+}
+// LOCALTEST (category `audio`, at most 256 lines): per hook and object, the inputs of the old and the new local
+// test whenever the pair (old test passed, new test passed) changes, so a trace shows every owner a hook rejected
+// (an NPC skater) or accepted, and when.
+//   LOCALTEST <ms> <hook> <object> <byte [[obj+16]+72]> <byte [[obj+28]+72]> <old word [[obj+16]+72] != 0> <accepted>
+//   6 fields.
+struct LocalTestSlot {
+  std::atomic<uint64_t> key{0};  // tag << 32 | object
+  std::atomic<uint32_t> code{0};  // 1 + old * 2 + accepted
+};
+LocalTestSlot g_localtest[64];
+std::atomic<int> g_localtest_lines{0};
+void NoteLocalTest(const char* hook, uint32_t tag, uint8_t* base, uint32_t obj, int b28) {
+  const uint64_t v = (static_cast<uint64_t>(tag) << 32) | obj;
+  const uint32_t ctl = TryU32(base, obj + 16, 0);
+  const int old_word = Plausible(ctl) && TryU32(base, ctl + 72, 0) != 0 ? 1 : 0;
+  const int accepted = b28 > 0 ? 1 : 0;
+  const uint32_t code = 1u + static_cast<uint32_t>(old_word * 2 + accepted);
+  for (LocalTestSlot& s : g_localtest) {
+    uint64_t cur = s.key.load(std::memory_order_relaxed);
+    if (cur == 0 && !s.key.compare_exchange_strong(cur, v, std::memory_order_relaxed) && cur != v) continue;
+    if (cur != 0 && cur != v) continue;
+    if (s.code.exchange(code, std::memory_order_relaxed) == code) return;
+    if (g_localtest_lines.fetch_add(1, std::memory_order_relaxed) < 256)
+      rex::audio_trace::line("LOCALTEST", "%s\t%08X\t%d\t%d\t%d\t%d", hook, obj, LocalByte(base, obj, 16), b28, old_word,
+                             accepted);
+    return;
+  }
 }
 uint32_t GrecOwnerOf(uint32_t st) {
   if (st == 0) return 0;
@@ -408,7 +445,8 @@ struct FirstHitLast {
   uint64_t ms = 0;
 };
 // Two GREC owners pass the local test (seen 2026-10-03: the board objects 40C33020 / 40C34020, each called once per
-// frame), so the last values are kept per state; a single set alternated the bail / end bytes on every call.
+// frame), so the last values are kept per state; a single set alternated the bail / end bytes on every call. The
+// local72 gate (LocalByte) now lets only the local rider through; the per-state slots stay for reloads.
 struct FirstHitSlot {
   uint32_t st = 0;
   FirstHitLast last;
@@ -453,8 +491,9 @@ extern "C" REX_FUNC(sub_824C6BD8) {
   __imp__sub_824C6BD8(ctx, base);
   const bool grec = On("audio"), grecx = On("audiox");
   if ((!grec && !grecx) || !Readable(base, owner, 1512)) return;
-  const uint32_t ctl = TryU32(base, owner + 16, 0);
-  if (!ctl || TryU32(base, ctl + 72, 0) == 0) return;  // local player only
+  const int b28 = LocalByte(base, owner, 28);
+  if (grec) NoteLocalTest("GREC", 1, base, owner, b28);
+  if (b28 <= 0) return;  // local rider only (local72)
   const uint32_t st = TryU32(base, owner + 36, 0);
   if (Plausible(st)) {
     g_local_audio_state.store(st, std::memory_order_relaxed);
@@ -487,9 +526,11 @@ extern "C" REX_FUNC(sub_824C6BD8) {
 }
 
 // TREAT / SEAMPAT / SEAMHIT (2026-10-02, specs from the audio port). Logged after the call for the local
-// player only, category `audio`. Each line ends with `<object> <local>`: local bit 1 = [[object+16]+72] != 0
-// (the GREC test), bit 2 = the object's state is the one GREC's local SkateBoard uses; logged when either is
-// set. Cheap and lock-free: a few guarded reads and one formatted line per call.
+// player only, category `audio`. Each line ends with `<object> <local>`: local bit 4 = byte [[object+28]+72] != 0
+// (local72, the gate since 2026-10-03), bit 1 = byte [[object+16]+72] != 0, bit 2 = the object's state is the one
+// GREC's local SkateBoard uses. Logged only when bit 4 is set. Before 2026-10-03 the lines were logged when the WORD
+// at [[object+16]+72] was non-zero (old bit 1) or the state matched (old bit 2): both passed for an NPC skater's
+// objects, so older traces need an object filter. Cheap and lock-free: a few guarded reads and one line per call.
 //   TREAT <ms> <+236 f32> <+240 f32> <+260 f32> <+224 u8> <+332 u8> <+200 u32> <object> <local>
 //       Class_Treatment update sub_824DD6F0 (r3 = object), state [object+32]: air time, predicted time to
 //       landing, jump height, the +224 byte, in the air, wheels on the ground. 8 fields.
@@ -501,12 +542,15 @@ extern "C" REX_FUNC(sub_824C6BD8) {
 //   SEAMHIT <ms> <wheel r4> <single r5 u8> <transition r6> <object> <local>
 //       Class_Seams hit sub_824C1DF8 (r3 = object). 5 fields.
 namespace {
-uint32_t LocalMask(uint8_t* base, uint32_t obj, uint32_t st) {
+// Logged only when bit 4 (local72) is set; bits 1 and 2 stay as information.
+uint32_t LocalMask(uint8_t* base, uint32_t obj, uint32_t st, const char* hook, uint32_t tag) {
   uint32_t mask = 0;
-  const uint32_t ctl = TryU32(base, obj + 16, 0);
-  if (Plausible(ctl) && TryU32(base, ctl + 72, 0) != 0) mask |= 1;
+  const int b28 = LocalByte(base, obj, 28);
+  NoteLocalTest(hook, tag, base, obj, b28);
+  if (LocalByte(base, obj, 16) > 0) mask |= 1;
   if (st != 0 && st == g_local_audio_state.load(std::memory_order_relaxed)) mask |= 2;
-  return mask;
+  if (b28 > 0) mask |= 4;
+  return (mask & 4) ? mask : 0;
 }
 std::atomic<int64_t> g_seampat_last_qpc{0};
 double SeamFrameMs() {
@@ -527,7 +571,7 @@ extern "C" REX_FUNC(sub_824DD6F0) {
   if (!On("audio") || !Readable(base, obj, 36)) return;
   const uint32_t st = LoadU32(base, obj + 32);
   if (!Readable(base, st, 336)) return;
-  const uint32_t mask = LocalMask(base, obj, st);
+  const uint32_t mask = LocalMask(base, obj, st, "TREAT", 2);
   if (mask == 0) return;
   rex::audio_trace::line("TREAT", "%.4f\t%.4f\t%.4f\t%u\t%u\t%u\t%08X\t%u", LoadF32(base, st + 236),
                          LoadF32(base, st + 240), LoadF32(base, st + 260), static_cast<unsigned>(base[st + 224]),
@@ -539,7 +583,7 @@ extern "C" REX_FUNC(sub_824C14C8) {
   if (!On("audio") || !Readable(base, obj, 36)) return;
   const uint32_t st = LoadU32(base, obj + 32);
   if (!Readable(base, st, 652)) return;
-  const uint32_t mask = LocalMask(base, obj, st);
+  const uint32_t mask = LocalMask(base, obj, st, "SEAMPAT", 3);
   if (mask == 0) return;
   char w[4][48];
   for (int i = 0; i < 4; ++i) Vec3Text(base, st + 384 + 16 * i, w[i], sizeof w[i]);
@@ -553,7 +597,7 @@ extern "C" REX_FUNC(sub_824C1DF8) {
   const unsigned single = ctx.r5.u32 & 0xFF;
   const int transition = ctx.r6.s32;
   if (On("audio") && Readable(base, obj, 36)) {
-    const uint32_t mask = LocalMask(base, obj, LoadU32(base, obj + 32));
+    const uint32_t mask = LocalMask(base, obj, LoadU32(base, obj + 32), "SEAMHIT", 4);
     if (mask != 0) rex::audio_trace::line("SEAMHIT", "%d\t%u\t%d\t%08X\t%u", wheel, single, transition, obj, mask);
   }
   __imp__sub_824C1DF8(ctx, base);
@@ -576,17 +620,32 @@ extern "C" REX_FUNC(sub_824C1DF8) {
 //       w3 = +16 pan, w4 = +20 pitch, w5 = +24 low-pass). out0..out9 = the controller's raw output halves
 //       ([[object+12]+12], id n = half (n & 1 ? high : low) of word n / 2), 4 hex digits each. 11 fields.
 namespace {
-thread_local uint32_t g_skid_last_holder = 0;
+// Last holder per owner (an owner's object can change on reloads).
+struct SkidLast {
+  uint32_t owner = 0, holder = 0;
+};
+thread_local SkidLast g_skid_last[4];
+uint32_t& SkidLastHolder(uint32_t owner) {
+  for (SkidLast& s : g_skid_last)
+    if (s.owner == owner) return s.holder;
+  for (SkidLast& s : g_skid_last)
+    if (s.owner == 0 || s.holder == 0) {
+      s = {owner, 0};
+      return s.holder;
+    }
+  g_skid_last[0] = {owner, 0};
+  return g_skid_last[0].holder;
+}
 }  // namespace
 extern "C" REX_FUNC(sub_824C7A20) {
   const uint32_t owner = ctx.r3.u32;
   __imp__sub_824C7A20(ctx, base);
   if (!On("audiox") || !Readable(base, owner, 1520)) return;
-  const uint32_t ctl = TryU32(base, owner + 16, 0);
-  if (!ctl || TryU32(base, ctl + 72, 0) == 0) return;  // local player only (the GREC test)
+  if (LocalByte(base, owner, 28) <= 0) return;  // local rider only (local72, as GREC)
   const uint32_t holder = LoadU32(base, owner + 1288);
-  if (holder == 0 && g_skid_last_holder == 0) return;
-  g_skid_last_holder = holder;
+  uint32_t& last_holder = SkidLastHolder(owner);
+  if (holder == 0 && last_holder == 0) return;
+  last_holder = holder;
   char words[18 * 12 + 2] = "-";
   uint32_t handle = 0;
   if (holder != 0 && Readable(base, holder, 76)) {
@@ -811,6 +870,26 @@ extern "C" REX_FUNC(sub_82BD60C8) {
                          ss_ok ? LoadF32(base, ss + 5220) : NAN, bits >> 1, bits & 1u, contacts, LoadF32(base, sc + 4036),
                          LoadF32(base, sc + 4040), Plausible(cfg) ? TryF32(base, cfg + 164) : NAN,
                          g_bail_local_how.load(std::memory_order_relaxed));
+}
+
+// BANDQ (2026-10-03, category `audiox`, opt-in): every impact-band query sub_82497088 (r3 material, f1 impact, r5 / r6
+// outputs = the band's low / high edge, r7 flag; returns the tier 0 / 1 / 2, or 3 under the floor). Logged after the call,
+// so the band edges the game really used can be read per material and compared with an exported band table:
+// tier 2 -> (b0, b4), tier 1 -> (b8, b0), tier 0 -> (b12, b8); tier 3 leaves the outputs untouched.
+//   BANDQ <ms> <caller> <material> <impact> <flag> <tier> <low> <high>
+//       caller = the return address (e.g. 0x824BC4D4 / 0x824BC534: the body poster's material A / B). 7 fields.
+extern "C" REX_FUNC(sub_82497088) {
+  const uint32_t lr = static_cast<uint32_t>(ctx.lr);
+  const int material = ctx.r3.s32;
+  const float impact = static_cast<float>(ctx.f1.f64);
+  const uint32_t out_low = ctx.r5.u32, out_high = ctx.r6.u32;
+  const unsigned flag = ctx.r7.u32 & 0xFF;
+  __imp__sub_82497088(ctx, base);
+  if (!On("audiox")) return;
+  const int tier = ctx.r3.s32;
+  const bool edges = tier >= 0 && tier <= 2;
+  rex::audio_trace::line("BANDQ", "%08X\t%d\t%.5f\t%u\t%d\t%.5f\t%.5f", lr, material, impact, flag, tier,
+                         edges ? TryF32(base, out_low) : NAN, edges ? TryF32(base, out_high) : NAN);
 }
 
 // COLLPOST (2026-10-03, category `audiox`, opt-in): every message posted to the collision sound manager,
