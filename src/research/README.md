@@ -9,6 +9,27 @@ original and only *reads* guest memory, so the game behaves as before; the one e
 Not intended for the upstream project. No game code, executable image or game data is included here: the
 hooks reference functions only by address and read fields by offset.
 
+> **Warning: reference and information gathering only.** A recompilation is not a perfect copy of the
+> console game, and these traces are not ground truth:
+> - The frame rate is uncapped (several hundred fps on a PC, against about 30 on an Xbox 360), so anything the
+>   game does once per rendered frame (some sound updates, one-frame trigger pulses) happens at a different rate.
+> - Timing and threading differ: the audio thread can stall for up to about a second, and there are hitches
+>   when streaming at speed.
+> - Treat logged values and program logic as strong evidence. Treat timings, rates per frame and gaps as
+>   specific to the recompilation until checked against the code or the console.
+> - The hooks themselves are research code. They are tested only as far as described here, and the addresses
+>   are for title update 3 only.
+
+## Building
+
+1. Build [skate3recomp](https://github.com/mchughalex/skate3recomp) as its README describes, from this branch
+   (`research-hooks`). You supply your own legally owned copy of the game, and the code generation step creates
+   the recompiled sources locally (they are not in this repository).
+2. Apply the SDK side: from `third_party/rexglue-sdk`, run `git apply ../../src/research/sdk/rexglue-sdk-research.patch`.
+3. Configure and build as usual. The hooks in `src/research/` are compiled in by `CMakeLists.txt`.
+4. Set the environment variables below and start the game. Any paths (trace file, capture, watch list,
+   input script) are your own; nothing here assumes a particular folder layout.
+
 ## Files
 
 | File | Category (`SKATE3_TRACE`) | What it logs |
