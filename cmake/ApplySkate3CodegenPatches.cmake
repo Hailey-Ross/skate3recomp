@@ -126,5 +126,7 @@ foreach(_file IN LISTS _skate3_recomp_files)
   break()
 endforeach()
 if(NOT _demo_path_movie_patched)
-  message(FATAL_ERROR "Failed to apply Skate 3 demo path intro movie patch; FEMoviePlayer::Update anchor not found")
+  # Research builds: when the anchor is not found (a different game build), skip the
+  # demo-path intro patch instead of failing; tracing does not need it.
+  message(WARNING "Skipped Skate 3 demo path intro movie patch; FEMoviePlayer::Update anchor not found")
 endif()

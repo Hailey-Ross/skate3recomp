@@ -1,0 +1,770 @@
+diff --git a/include/rex/audio/audio_trace.h b/include/rex/audio/audio_trace.h
+new file mode 100644
+index 0000000..2215686
+--- /dev/null
++++ b/include/rex/audio/audio_trace.h
+@@ -0,0 +1,168 @@
++// Research hooks (tracing tools; not intended for the upstream project): records which
++// sound data the game reads and decodes, so retail sound choices can be
++// measured. Enabled only when SKATE3_AUDIO_TRACE_FILE names an output file.
++// One line per event, tab-separated, first field = milliseconds since start:
++//   READ <ms> <path> <file offset> <length> <guest address>
++//   XMA  <ms> <context> <buffer index> <guest address> <packet count>
++//
++// ONE writer per process (2026-10-02). The exe (game hooks) and the runtime DLL (kernel, XMA, input)
++// each compile this header, so each has its own copy of these statics. Before, both opened the file in
++// text-mode append and wrote independently: the CRT split their writes and the two streams interleaved
++// mid-line (malformed / empty lines). Now the first module to initialise becomes the OWNER: it opens the
++// file (binary append), runs the only writer thread and publishes a plain C function pointer
++// `append(data, n)` in a process environment variable. The other module never touches the file; its
++// line() formats locally and calls the owner's append. No STL object or heap memory crosses the module
++// boundary (the two modules may use different CRT heaps). Owner election is serialised by a named mutex.
++// Light mode: game threads only format + append under a short lock; the writer thread writes one batch per
++// 100 ms with a single fwrite + fflush (a crash loses at most ~100 ms of lines).
++#pragma once
++
++#include <algorithm>
++#include <chrono>
++#include <cstdarg>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
++#include <string>
++#include <thread>
++#if defined(_WIN32)
++// kernel32, declared here to keep <Windows.h> (and its macros) out of every includer.
++extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(const char*, char*,
++                                                                                 unsigned long);
++extern "C" __declspec(dllimport) int __stdcall SetEnvironmentVariableA(const char*, const char*);
++struct _SECURITY_ATTRIBUTES;  // same signature as <synchapi.h> (LPSECURITY_ATTRIBUTES, BOOL, LPCSTR)
++extern "C" __declspec(dllimport) void* __stdcall CreateMutexA(_SECURITY_ATTRIBUTES*, int, const char*);
++extern "C" __declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void*, unsigned long);
++extern "C" __declspec(dllimport) int __stdcall ReleaseMutex(void*);
++extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentProcessId();
++#endif
++
++namespace rex::audio_trace {
++
++using AppendFn = void (*)(const char* data, int size);
++
++// Owner side: the pending buffer and the file, used only by the owner module.
++struct OwnerSink {
++  std::mutex mutex;
++  std::string pending;
++  std::FILE* file = nullptr;
++};
++
++inline OwnerSink& owner_sink() {
++  static OwnerSink sink;
++  return sink;
++}
++
++// The owner's append (published to the other module as a plain function pointer).
++inline void owner_append(const char* data, int size) {
++  OwnerSink& sink = owner_sink();
++  std::lock_guard<std::mutex> lock(sink.mutex);
++  sink.pending.append(data, static_cast<size_t>(size));
++}
++
++inline void owner_writer_loop() {
++  OwnerSink& sink = owner_sink();
++  std::string batch;
++  for (;;) {
++    std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    {
++      std::lock_guard<std::mutex> lock(sink.mutex);
++      batch.swap(sink.pending);
++    }
++    if (!batch.empty()) {
++      std::fwrite(batch.data(), 1, batch.size(), sink.file);
++      std::fflush(sink.file);
++      batch.clear();
++    }
++  }
++}
++
++struct State {
++  AppendFn append = nullptr;  // owner_append (this module or the other); null = tracing disabled
++  bool owner = false;
++  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++  State() {
++    const char* path = std::getenv("SKATE3_AUDIO_TRACE_FILE");
++    if (!path || !*path) return;
++#if defined(_WIN32)
++    char name[64];
++    std::snprintf(name, sizeof name, "Local\\skate3_audio_trace_%lu", GetCurrentProcessId());
++    void* election = CreateMutexA(nullptr, 0, name);
++    if (election) WaitForSingleObject(election, 0xFFFFFFFFu);
++    char shared[32] = {};
++    if (GetEnvironmentVariableA("SKATE3_AUDIO_TRACE_SINK", shared, sizeof(shared)) > 0) {
++      // The other module owns the file: use its append and its time zero.
++      append = reinterpret_cast<AppendFn>(static_cast<uintptr_t>(std::strtoull(shared, nullptr, 16)));
++      char t0[32] = {};
++      if (GetEnvironmentVariableA("SKATE3_AUDIO_TRACE_T0", t0, sizeof(t0)) > 0) {
++        start = std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(std::strtoll(t0, nullptr, 10)));
++      }
++    } else {
++      OwnerSink& sink = owner_sink();
++      sink.file = std::fopen(path, "ab");  // binary: no CRT newline translation, one write per batch
++      if (sink.file) {
++        owner = true;
++        append = &owner_append;
++        std::snprintf(shared, sizeof shared, "%llx",
++                      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(append)));
++        SetEnvironmentVariableA("SKATE3_AUDIO_TRACE_T0", std::to_string(start.time_since_epoch().count()).c_str());
++        SetEnvironmentVariableA("SKATE3_AUDIO_TRACE_SINK", shared);
++        // The wall-clock time of the time zero (unix ms), for screenshots.
++        const auto unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                                 std::chrono::system_clock::now().time_since_epoch()).count();
++        std::fprintf(sink.file, "CLOCK\t0.0\t%lld\n", static_cast<long long>(unix_ms));
++        std::fflush(sink.file);
++        std::thread(owner_writer_loop).detach();
++      }
++    }
++    if (election) ReleaseMutex(election);  // the handle stays open for the process lifetime
++#else
++    OwnerSink& sink = owner_sink();
++    sink.file = std::fopen(path, "ab");
++    if (sink.file) {
++      owner = true;
++      append = &owner_append;
++      std::thread(owner_writer_loop).detach();
++    }
++#endif
++  }
++  ~State() {
++    // Process exit: the writer thread may already be gone; write what is left without waiting for it.
++    if (!owner) return;
++    OwnerSink& sink = owner_sink();
++    if (sink.file && sink.mutex.try_lock()) {
++      std::fwrite(sink.pending.data(), 1, sink.pending.size(), sink.file);
++      std::fflush(sink.file);
++      sink.pending.clear();
++      sink.mutex.unlock();
++    }
++  }
++};
++
++inline State& state() {
++  static State s;
++  return s;
++}
++
++inline bool enabled() { return state().append != nullptr; }
++
++// printf-style; a newline is appended. Formats on the calling thread, then hands the complete line to the
++// process's single writer.
++inline void line(const char* kind, const char* format, ...) {
++  State& s = state();
++  if (!s.append) return;
++  const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s.start).count();
++  char buffer[2048];
++  int n = std::snprintf(buffer, sizeof buffer, "%s\t%.1f\t", kind, ms);
++  if (n < 0) return;
++  va_list args;
++  va_start(args, format);
++  const int m = std::vsnprintf(buffer + n, sizeof buffer - n - 1, format, args);
++  va_end(args);
++  n = m < 0 ? n : std::min<int>(n + m, static_cast<int>(sizeof buffer) - 2);
++  buffer[n++] = '\n';
++  s.append(buffer, n);
++}
++
++}  // namespace rex::audio_trace
+diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
+index 4e324fc..cb69ba4 100644
+--- a/include/rex/audio/xma/context.h
++++ b/include/rex/audio/xma/context.h
+@@ -278,6 +278,9 @@ class XmaContext {
+   std::unique_ptr<rex::thread::Event> work_completion_event_;
+ 
+   uint32_t id_ = 0;
++  // audio-trace: last input buffer address logged for this context.
++  uint32_t trace_last_buffer_ = 0;
++  void TraceInputBuffer(const XMA_CONTEXT_DATA* data, const uint8_t* buffer);
+   uint32_t guest_ptr_ = 0;
+   std::mutex lock_;
+   std::atomic<bool> is_allocated_ = false;
+diff --git a/include/rex/input/input_script.h b/include/rex/input/input_script.h
+new file mode 100644
+index 0000000..9726bc9
+--- /dev/null
++++ b/include/rex/input/input_script.h
+@@ -0,0 +1,340 @@
++// Research hooks (tracing tools; not intended for the upstream project): plays a pad script so trace sessions
++// need no hand-performed actions, and records the real pad as such a script.
++//
++// SKATE3_INPUT_SCRIPT=<file>: the script starts when L3+R3 are pressed together on the real pad (or by
++// autostart, below) and replaces the pad state while it runs. Labelled steps write "MARK <label>" lines
++// into the audio trace (rex/audio/audio_trace.h).
++//
++// Script: one step per line, "<duration> [tokens...] [# label]"; blank lines and '#' lines ignored.
++//   duration: "<n>p" = n input polls (game frames; recordings use this, so replays stay in step with
++//             the game even when it hitches or runs slower in the background), or "<ms>" = wall time
++//             (hand-written scripts).
++//   tokens:   a b x y lb rb start back up down left right l3 r3, lt rt (full) or lt=<0..1> rt=,
++//             sticks lx=<-1..1> ly= rx= ry= (up/right positive). No tokens = neutral pad.
++//   gameplay: neutral until gameplay (presence context 0x8001 == 1) has lasted the duration without a
++//             pause/loading break; the next step is timed from that point. Recordings write
++//             "10p gameplay" at every return to gameplay (after a teleport or pause), so loading times
++//             that differ between runs don't shift the inputs that follow.
++//
++// SKATE3_INPUT_RECORD=<file>: writes the real pad from the first moment of gameplay in this format, one
++// line per pad change, poll durations, sticks/triggers at full resolution (|v| < 0.02 written as 0).
++//
++// SKATE3_BACKGROUND=1: isolates the game from the real pad (state zeroed before the demo path's
++// synthetic presses, keystrokes dropped) so it can run unattended while the user plays something else.
++// SKATE3_INPUT_SCRIPT_AUTOSTART_MS=<ms>: start the script once gameplay has been active for <ms>
++// without a pause/loading break, for unattended sessions.
++
++#pragma once
++
++#include <rex/audio/audio_trace.h>
++#include <rex/input/input.h>
++#include <rex/kernel/guest_presence.h>
++
++#include <chrono>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <mutex>
++#include <sstream>
++#include <string>
++#include <vector>
++
++namespace rex::input_script {
++
++using namespace rex::input;
++
++// Polls of uninterrupted gameplay that count as "back in gameplay" (recorder sync points).
++constexpr uint32_t kSyncPolls = 10;
++
++struct Step {
++  uint32_t ms = 0;     // wall-time duration (when polls == 0)
++  uint32_t polls = 0;  // poll-count duration
++  uint16_t buttons = 0;
++  uint8_t lt = 0, rt = 0;
++  int16_t lx = 0, ly = 0, rx = 0, ry = 0;
++  bool wait_gameplay = false;
++  std::string label;
++};
++
++struct State {
++  std::mutex mutex;
++  bool loaded = false;
++  std::vector<Step> steps;
++  bool running = false;
++  bool combo_was_down = false;
++  int autostart_ms = -1;  // <0: off
++  bool autostart_armed = false;
++  std::chrono::steady_clock::time_point autostart_at;
++  size_t index = 0;
++  std::chrono::steady_clock::time_point step_start;
++  uint32_t step_polls = 0;      // polls spent in the current step
++  uint32_t gameplay_polls = 0;  // consecutive polls with presence 1
++  std::chrono::steady_clock::time_point gameplay_since;
++  // recorder
++  std::FILE* record = nullptr;
++  bool recording = false;
++  std::string record_last;
++  int64_t record_polls = 0;
++  bool record_in_gameplay = true;
++  uint32_t record_gameplay_polls = 0;
++};
++
++inline bool Background() {
++  static const bool on = [] {
++    const char* v = std::getenv("SKATE3_BACKGROUND");
++    return v && *v && *v != '0';
++  }();
++  return on;
++}
++
++// Background mode: drop the real pad (call before the demo path's synthetic presses are applied).
++inline void Isolate(X_INPUT_STATE* input_state) {
++  if (!input_state || !Background()) return;
++  input_state->gamepad.buttons = 0;
++  input_state->gamepad.left_trigger = 0;
++  input_state->gamepad.right_trigger = 0;
++  input_state->gamepad.thumb_lx = 0;
++  input_state->gamepad.thumb_ly = 0;
++  input_state->gamepad.thumb_rx = 0;
++  input_state->gamepad.thumb_ry = 0;
++}
++
++inline State& state() {
++  static State s;
++  return s;
++}
++
++inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
++
++inline bool Token(const std::string& t, Step& s) {
++  static const struct { const char* name; uint16_t bit; } kButtons[] = {
++      {"up", X_INPUT_GAMEPAD_DPAD_UP}, {"down", X_INPUT_GAMEPAD_DPAD_DOWN},
++      {"left", X_INPUT_GAMEPAD_DPAD_LEFT}, {"right", X_INPUT_GAMEPAD_DPAD_RIGHT},
++      {"start", X_INPUT_GAMEPAD_START}, {"back", X_INPUT_GAMEPAD_BACK},
++      {"l3", X_INPUT_GAMEPAD_LEFT_THUMB}, {"r3", X_INPUT_GAMEPAD_RIGHT_THUMB},
++      {"lb", X_INPUT_GAMEPAD_LEFT_SHOULDER}, {"rb", X_INPUT_GAMEPAD_RIGHT_SHOULDER},
++      {"a", X_INPUT_GAMEPAD_A}, {"b", X_INPUT_GAMEPAD_B}, {"x", X_INPUT_GAMEPAD_X},
++      {"y", X_INPUT_GAMEPAD_Y}};
++  for (const auto& b : kButtons) {
++    if (t == b.name) {
++      s.buttons |= b.bit;
++      return true;
++    }
++  }
++  if (t == "gameplay") { s.wait_gameplay = true; return true; }
++  if (t == "lt") { s.lt = 255; return true; }
++  if (t == "rt") { s.rt = 255; return true; }
++  if (t.size() > 3 && t[2] == '=') {
++    const std::string key = t.substr(0, 2);
++    const double v = std::atof(t.c_str() + 3);
++    const auto axis = [&](int16_t& out) { out = static_cast<int16_t>(std::lround(Clamp(v, -1, 1) * 32767.0)); };
++    const auto trigger = [&](uint8_t& out) { out = static_cast<uint8_t>(std::lround(Clamp(v, 0, 1) * 255.0)); };
++    if (key == "lx") { axis(s.lx); return true; }
++    if (key == "ly") { axis(s.ly); return true; }
++    if (key == "rx") { axis(s.rx); return true; }
++    if (key == "ry") { axis(s.ry); return true; }
++    if (key == "lt") { trigger(s.lt); return true; }
++    if (key == "rt") { trigger(s.rt); return true; }
++  }
++  return false;
++}
++
++inline void Load(State& st) {
++  st.loaded = true;
++  if (const char* r = std::getenv("SKATE3_INPUT_RECORD"); r && *r) st.record = std::fopen(r, "w");
++  if (const char* a = std::getenv("SKATE3_INPUT_SCRIPT_AUTOSTART_MS"); a && *a) st.autostart_ms = std::atoi(a);
++  const char* path = std::getenv("SKATE3_INPUT_SCRIPT");
++  if (!path || !*path) return;
++  std::ifstream in(path);
++  std::string line;
++  int number = 0;
++  while (std::getline(in, line)) {
++    ++number;
++    std::string label;
++    if (size_t hash = line.find('#'); hash != std::string::npos) {
++      label = line.substr(hash + 1);
++      line.resize(hash);
++      while (!label.empty() && (label.front() == ' ' || label.front() == '\t')) label.erase(0, 1);
++      while (!label.empty() && (label.back() == '\r' || label.back() == ' ')) label.pop_back();
++    }
++    std::istringstream words(line);
++    std::string word;
++    if (!(words >> word)) continue;  // comment or blank line
++    Step s;
++    if (!word.empty() && word.back() == 'p') {
++      s.polls = static_cast<uint32_t>(std::atoi(word.c_str()));
++    } else {
++      s.ms = static_cast<uint32_t>(std::atoi(word.c_str()));
++    }
++    s.label = label;
++    while (words >> word) {
++      if (!Token(word, s)) {
++        audio_trace::line("MARK", "script line %d: unknown token '%s' (script disabled)", number,
++                          word.c_str());
++        st.steps.clear();
++        return;
++      }
++    }
++    st.steps.push_back(s);
++  }
++  audio_trace::line("MARK", "script loaded: %zu steps from %s", st.steps.size(), path);
++}
++
++inline std::string Describe(const X_INPUT_STATE* in) {
++  static const struct { const char* name; uint16_t bit; } kButtons[] = {
++      {"a", X_INPUT_GAMEPAD_A}, {"b", X_INPUT_GAMEPAD_B}, {"x", X_INPUT_GAMEPAD_X},
++      {"y", X_INPUT_GAMEPAD_Y}, {"lb", X_INPUT_GAMEPAD_LEFT_SHOULDER},
++      {"rb", X_INPUT_GAMEPAD_RIGHT_SHOULDER}, {"start", X_INPUT_GAMEPAD_START},
++      {"back", X_INPUT_GAMEPAD_BACK}, {"up", X_INPUT_GAMEPAD_DPAD_UP},
++      {"down", X_INPUT_GAMEPAD_DPAD_DOWN}, {"left", X_INPUT_GAMEPAD_DPAD_LEFT},
++      {"right", X_INPUT_GAMEPAD_DPAD_RIGHT}, {"l3", X_INPUT_GAMEPAD_LEFT_THUMB},
++      {"r3", X_INPUT_GAMEPAD_RIGHT_THUMB}};
++  std::string out;
++  const uint16_t buttons = static_cast<uint16_t>(in->gamepad.buttons);
++  for (const auto& b : kButtons)
++    if (buttons & b.bit) out += std::string(" ") + b.name;
++  char text[24];
++  const struct { const char* name; uint8_t v; } kTriggers[] = {
++      {"lt", in->gamepad.left_trigger}, {"rt", in->gamepad.right_trigger}};
++  for (const auto& t : kTriggers) {
++    if (t.v == 0) continue;
++    std::snprintf(text, sizeof(text), " %s=%.3f", t.name, t.v / 255.0);
++    out += text;
++  }
++  const struct { const char* name; int16_t v; } kAxes[] = {
++      {"lx", in->gamepad.thumb_lx}, {"ly", in->gamepad.thumb_ly},
++      {"rx", in->gamepad.thumb_rx}, {"ry", in->gamepad.thumb_ry}};
++  for (const auto& a : kAxes) {
++    const double v = a.v / 32767.0;
++    if (v > -0.02 && v < 0.02) continue;
++    std::snprintf(text, sizeof(text), " %s=%.4f", a.name, v);
++    out += text;
++  }
++  return out;
++}
++
++inline void Record(State& st, const X_INPUT_STATE* in) {
++  if (!st.record) return;
++  const bool gameplay = rex::kernel::guest_presence::GameplayContextValue() == 1;
++  if (!st.recording) {
++    if (!gameplay) return;
++    st.recording = true;
++    st.record_last = Describe(in);
++    st.record_polls = 1;
++    std::fprintf(st.record, "# recorded from the first moment of gameplay; durations in polls (p)\n");
++    return;
++  }
++  // Sync point: gameplay back for kSyncPolls polls after a pause/loading. A neutral pad held through
++  // the loading is dropped (the replay waits for its own loading instead).
++  st.record_gameplay_polls = gameplay ? st.record_gameplay_polls + 1 : 0;
++  if (!gameplay) st.record_in_gameplay = false;
++  if (!st.record_in_gameplay && st.record_gameplay_polls == kSyncPolls) {
++    if (!st.record_last.empty()) {
++      std::fprintf(st.record, "%lldp%s\n", static_cast<long long>(st.record_polls - kSyncPolls + 1),
++                   st.record_last.c_str());
++    }
++    std::fprintf(st.record, "%up gameplay\n", kSyncPolls);
++    std::fflush(st.record);
++    st.record_in_gameplay = true;
++    st.record_polls = 0;
++  }
++  const std::string current = Describe(in);
++  if (current == st.record_last) {
++    ++st.record_polls;
++    return;
++  }
++  if (st.record_polls > 0) {
++    std::fprintf(st.record, "%lldp%s\n", static_cast<long long>(st.record_polls), st.record_last.c_str());
++    std::fflush(st.record);
++  }
++  st.record_last = current;
++  st.record_polls = 1;
++}
++
++inline void Mark(const Step& s) {
++  if (!s.label.empty()) audio_trace::line("MARK", "%s", s.label.c_str());
++}
++
++// Called with the real pad state each poll; rewrites it while the script runs.
++inline void Apply(X_INPUT_STATE* input_state) {
++  if (!input_state) return;
++  State& st = state();
++  std::lock_guard<std::mutex> lock(st.mutex);
++  if (!st.loaded) Load(st);
++  Record(st, input_state);
++  if (st.steps.empty()) return;
++
++  const auto now = std::chrono::steady_clock::now();
++  const bool in_gameplay = rex::kernel::guest_presence::GameplayContextValue() == 1;
++  st.gameplay_polls = in_gameplay ? st.gameplay_polls + 1 : 0;
++  if (!in_gameplay) st.gameplay_since = now;
++
++  constexpr uint16_t kCombo = X_INPUT_GAMEPAD_LEFT_THUMB | X_INPUT_GAMEPAD_RIGHT_THUMB;
++  const bool combo = (static_cast<uint16_t>(input_state->gamepad.buttons) & kCombo) == kCombo;
++  bool autostart = false;
++  if (st.autostart_ms >= 0 && !st.running) {
++    if (!in_gameplay) {
++      st.autostart_armed = false;
++    } else if (!st.autostart_armed) {
++      st.autostart_armed = true;
++      st.autostart_at = now + std::chrono::milliseconds(st.autostart_ms);
++      audio_trace::line("MARK", "gameplay active; script autostart in %d ms unless interrupted", st.autostart_ms);
++    } else if (now >= st.autostart_at) {
++      autostart = true;
++      st.autostart_ms = -1;  // once
++    }
++  }
++  if ((combo && !st.combo_was_down) || autostart) {
++    st.running = true;
++    st.index = 0;
++    st.step_start = now;
++    st.step_polls = 0;
++    audio_trace::line("MARK", "script start");
++    Mark(st.steps[0]);
++  }
++  st.combo_was_down = combo;
++  if (!st.running) return;
++
++  // Advance past finished steps. Poll steps advance by at most one poll per call, so no recorded
++  // state (a 1-poll flick) is ever skipped.
++  for (;;) {
++    const Step& cur = st.steps[st.index];
++    bool done;
++    if (cur.wait_gameplay) {
++      done = cur.polls ? st.gameplay_polls >= cur.polls
++                       : in_gameplay && now - st.gameplay_since >= std::chrono::milliseconds(cur.ms);
++    } else if (cur.polls) {
++      done = st.step_polls >= cur.polls;
++    } else {
++      done = now - st.step_start >= std::chrono::milliseconds(cur.ms);
++    }
++    if (!done) break;
++    if (!cur.polls && !cur.wait_gameplay) {
++      st.step_start += std::chrono::milliseconds(cur.ms);
++    } else {
++      st.step_start = now;
++    }
++    st.step_polls = 0;
++    if (++st.index >= st.steps.size()) {
++      st.running = false;
++      audio_trace::line("MARK", "script end");
++      return;
++    }
++    Mark(st.steps[st.index]);
++  }
++  ++st.step_polls;
++  const Step& s = st.steps[st.index];
++  input_state->gamepad.buttons = s.buttons;
++  input_state->gamepad.left_trigger = s.lt;
++  input_state->gamepad.right_trigger = s.rt;
++  input_state->gamepad.thumb_lx = s.lx;
++  input_state->gamepad.thumb_ly = s.ly;
++  input_state->gamepad.thumb_rx = s.rx;
++  input_state->gamepad.thumb_ry = s.ry;
++  input_state->packet_number = static_cast<uint32_t>(input_state->packet_number) + 1;
++}
++
++}  // namespace rex::input_script
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 0e7cfce..5e5be73 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -12,10 +12,13 @@
+ #include <algorithm>
+ #include <array>
+ #include <chrono>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <string>
+ 
+ #include <rex/assert.h>
++#include <rex/audio/audio_trace.h>
+ #include <rex/audio/conversion.h>
+ #include <rex/audio/flags.h>
+ #include <rex/audio/sdl/sdl_audio_driver.h>
+@@ -288,6 +291,26 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+       }
+       additional_amount -= len;
+     } else {
++      // Local trace aid: SKATE3_AUDIO_CAPTURE=<file> appends the final mix (stereo float32 LE,
++      // 48 kHz) before the mute, so muted background runs still capture; a CAPTURE trace line every
++      // ~0.5 s gives <frames written> at that trace time for alignment.
++      {
++        static std::FILE* capture = [] {
++          const char* path = std::getenv("SKATE3_AUDIO_CAPTURE");
++          return path && *path ? std::fopen(path, "wb") : nullptr;
++        }();
++        static unsigned long long captured = 0;
++        if (capture) {
++          float stereo[channel_samples_ * 2];
++          conversion::sequential_6_BE_to_interleaved_2_LE(stereo, buffer, channel_samples_);
++          std::fwrite(stereo, sizeof(float), channel_samples_ * 2, capture);
++          if (captured % 24064 == 0) {
++            std::fflush(capture);
++            rex::audio_trace::line("CAPTURE", "%llu", captured);
++          }
++          captured += channel_samples_;
++        }
++      }
+       if (REXCVAR_GET(audio_mute)) {
+         std::memset(data, 0, len);
+       } else {
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+index 98734ba..33aae16 100644
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -9,6 +9,7 @@
+ * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ */
+ 
++#include <rex/audio/audio_trace.h>
+ #include <algorithm>
+ #include <cstring>
+ #include <tuple>
+@@ -98,6 +99,29 @@ int XmaContext::Setup(uint32_t id, memory::Memory* memory, uint32_t guest_ptr) {
+   return 0;
+ }
+ 
++// audio-trace: one line per new input buffer a context starts decoding (both
++// decoder paths). Host pointer lets READ lines (virtual guest addresses) and XMA
++// buffers (physical addresses) be matched; payload bytes 4..36 allow matching
++// data copied out of a bank.
++void XmaContext::TraceInputBuffer(const XMA_CONTEXT_DATA* data, const uint8_t* buffer) {
++  if (!rex::audio_trace::enabled() || !buffer) {
++    return;
++  }
++  const uint32_t address = data->GetCurrentInputBufferAddress();
++  if (address == trace_last_buffer_) {
++    return;
++  }
++  trace_last_buffer_ = address;
++  char payload[65] = {};
++  for (int i = 0; i < 32; ++i) {
++    std::snprintf(payload + i * 2, 3, "%02x", buffer[4 + i]);
++  }
++  rex::audio_trace::line("XMA", "%u	%u	0x%08X	%u	%s	%p", id(),
++                         static_cast<unsigned>(data->current_buffer), address,
++                         data->GetCurrentInputBufferPacketCount(), payload,
++                         static_cast<const void*>(buffer));
++}
++
+ bool XmaContext::Work() {
+   // NOTE: do NOT decode ahead of the kick ("eager decode" on cleared
+   // contexts was tried and increased mix clicks ~60%): the game commits
+@@ -654,6 +678,8 @@ void XmaContext::Decode(XMA_CONTEXT_DATA* data) {
+ 
+   uint8_t* current_input_buffer = GetCurrentInputBuffer(data);
+ 
++  TraceInputBuffer(data, current_input_buffer);
++
+   input_buffer_.fill(0);
+ 
+   // Detect loop end frame before UpdateLoopStatus resets the offset.
+@@ -1028,6 +1054,7 @@ void XmaContext::DecodeOldFrame(XMA_CONTEXT_DATA* data) {
+     REXAPU_ERROR("XmaContext {} old: input buffer pointer is invalid", id());
+     return;
+   }
++  TraceInputBuffer(data, current_input_buffer);
+ 
+   if (!data->output_buffer_block_count) {
+     REXAPU_ERROR("XmaContext {} old: output_buffer_block_count is 0", id());
+diff --git a/src/kernel/xam/xam_input.cpp b/src/kernel/xam/xam_input.cpp
+index caa3538..8315c11 100644
+--- a/src/kernel/xam/xam_input.cpp
++++ b/src/kernel/xam/xam_input.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <rex/input/input.h>
++#include <rex/input/input_script.h>
+ #include <rex/input/input_system.h>
+ #include <rex/kernel/xam/input_injection.h>
+ #include <rex/kernel/xam/private.h>
+@@ -246,7 +247,9 @@ u32 XamInputGetState_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_STATE> i
+   auto* is = input_system();
+   const u32 result = is->GetState(actual_user_index, input_state);
+   if (result == X_ERROR_SUCCESS) {
++    rex::input_script::Isolate(input_state);  // local trace aid: SKATE3_BACKGROUND
+     ApplySyntheticInput(input_state);
++    rex::input_script::Apply(input_state);  // local trace aid: SKATE3_INPUT_SCRIPT
+   }
+   return result;
+ }
+@@ -293,6 +296,7 @@ u32 XamInputGetKeystroke_entry(u32 user_index, u32 flags, ppc_ptr_t<X_INPUT_KEYS
+     return X_ERROR_SUCCESS;
+   }
+ 
++  if (rex::input_script::Background()) return X_ERROR_EMPTY;  // local trace aid
+   auto* is = input_system();
+   return is->GetKeystroke(actual_user_index, flags, keystroke);
+ }
+@@ -315,6 +319,7 @@ u32 XamInputGetKeystrokeEx_entry(mapped_u32 user_index_ptr, u32 flags,
+     user_index = 0;
+   }
+ 
++  if (rex::input_script::Background()) return X_ERROR_EMPTY;  // local trace aid
+   auto* is = input_system();
+   auto result = is->GetKeystroke(user_index, flags, keystroke);
+   if (XSUCCEEDED(result)) {
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_io.cpp b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+index 3f1a852..8a24a28 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_io.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
+@@ -12,6 +12,7 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <rex/audio/audio_trace.h>
+ #include <rex/filesystem/device.h>
+ #include <rex/kernel/xboxkrnl/private.h>
+ #include <rex/logging.h>
+@@ -213,9 +214,18 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
+     if (true || file->is_synchronous()) {
+       // Synchronous.
+       uint32_t bytes_read = 0;
++      const uint64_t trace_position = file->position();
+       result = file->Read(buffer.guest_address(), buffer_length,
+                           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
+                           &bytes_read, apc_context.guest_address());
++      // audio-trace: where audio archive data lands in guest memory.
++      if (rex::audio_trace::enabled() && XSUCCEEDED(result) &&
++          file->path().find("audio") != std::string::npos) {
++        const uint64_t at = byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : trace_position;
++        rex::audio_trace::line("READ", "%s\t%llu\t%u\t0x%08X\t%p", file->path().c_str(),
++                               static_cast<unsigned long long>(at), bytes_read, buffer.guest_address(),
++                               static_cast<const void*>(buffer.host_address()));
++      }
+       if (io_status_block) {
+         io_status_block->status = result;
+         io_status_block->information = bytes_read;
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index 50a26d0..e013907 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -387,7 +387,9 @@ void ImGuiDrawer::SetupFonts() {
+     // DirectWrite white-on-black edge
+     // profiles (identity was measurably thinner/dimmer). The *_on_light_
+     // variants below keep gamma 1.0 - dark-on-light needs no correction.
+-    config.RasterizerGamma = 0.62f;
++    // audio-trace local build: imgui at public pin 6d910d5 lacks RasterizerGamma
++    // (the SDK pins an unpublished imgui commit).
++    //config.RasterizerGamma = 0.62f;
+     config.FontLoaderFlags = ImGuiFreeTypeBuilderFlags_NoHinting;
+     ui_font_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(
+         GetInterRegularCompressedBase85(), 18.0f, &config);
+@@ -408,7 +410,9 @@ void ImGuiDrawer::SetupFonts() {
+     config_on_light.RasterizerMultiply = 1.0f;
+     // Dark-on-light matches the browser with NO coverage curve (harness fit:
+     // identity beat every contrast/gamma variant once bake==draw size).
+-    config_on_light.RasterizerGamma = 1.0f;
++    // audio-trace local build: imgui at public pin 6d910d5 lacks RasterizerGamma
++    // (the SDK pins an unpublished imgui commit).
++    //config_on_light.RasterizerGamma = 1.0f;
+     ui_font_on_light_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(
+         GetInterRegularCompressedBase85(), 18.0f, &config_on_light);
+     ui_font_semibold_on_light_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(
+diff --git a/src/ui/window_win.cpp b/src/ui/window_win.cpp
+index f67ae6a..8652f60 100644
+--- a/src/ui/window_win.cpp
++++ b/src/ui/window_win.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdlib>
+ #include <algorithm>
+ #include <memory>
+ #include <string>
+@@ -315,8 +316,14 @@ bool Win32Window::OpenImpl() {
+     }
+   }
+ 
+-  // Finally show the window.
+-  ShowWindow(hwnd_, SW_SHOWNORMAL);
++  // Finally show the window. Local trace aid: SKATE3_BACKGROUND=1 shows it without activation at
++  // the bottom of the z-order, so unattended sessions don't take focus from the user's game.
++  if (const char* bg = std::getenv("SKATE3_BACKGROUND"); bg && *bg && *bg != '0') {
++    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
++    SetWindowPos(hwnd_, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
++  } else {
++    ShowWindow(hwnd_, SW_SHOWNORMAL);
++  }
+ 
+   // Report the initial actual state after opening, messages for which might
+   // have missed if they were processed during CreateWindowExW when the HWND was
+@@ -630,6 +637,7 @@ void Win32Window::ApplyNewCursorVisibility(CursorVisibility old_cursor_visibilit
+ }
+ 
+ void Win32Window::FocusImpl() {
++  if (const char* bg = std::getenv("SKATE3_BACKGROUND"); bg && *bg && *bg != '0') return;
+   SetFocus(hwnd_);
+ }
+ 

@@ -242,6 +242,13 @@ include(cmake/CodegenTargets.cmake)
 set(SKATE3_COMMON_SOURCES
     src/exception_compat.cpp
     src/skate3_app_common.cpp
+    src/research/hooks_audio.cpp
+    src/research/hooks_physics.cpp
+    src/research/hooks_watch.cpp
+    src/research/hooks_world.cpp
+    src/research/hooks_npc.cpp
+    src/research/hooks_traffic.cpp
+    src/research/hooks_queue.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp
