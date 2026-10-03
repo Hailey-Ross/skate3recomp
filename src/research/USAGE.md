@@ -142,6 +142,13 @@ Script format, one step per line (`#` starts a comment; a comment after a step i
 Long replays drift away from the original session (physics differs slightly run to run). Prefer short scripts
 for a single action, repeated, over replaying a long recording.
 
+### Controller: open the settings / quit
+
+Hold **LB + RB + Back for 1 second** to open the settings screen with a controller (couch / Steam Link play);
+**Close Game** in it quits to the desktop. Change or disable the chord with `skate3_menu_pad_chord` (empty =
+off) and the hold time with `skate3_menu_pad_hold_ms`; see the README. Scripts can trigger it too
+(`1500 lb rb back`). The game still sees the buttons, so Instant Replay (Back) opens underneath.
+
 ## 7. Recording the game's own audio
 
 `SKATE3_AUDIO_CAPTURE=<file>` also writes the mixed game output as raw samples with no header (stereo,

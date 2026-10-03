@@ -12,6 +12,7 @@
 #include "skate3_user_settings.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <cstdint>
@@ -105,8 +106,99 @@ REXCVAR_DEFINE_BOOL(skate3_ultrawide_widen_game_frustum, true, "Skate 3",
 REXCVAR_DEFINE_DOUBLE(skate3_ultrawide_target_aspect, 0.0, "Skate 3",
                       "Ultrawide display aspect (0 = derive from the host display at boot)")
     .range(0.0, 8.0);
+// Controller hold-chord for the settings screen (couch / Steam Link play):
+// no single button is taken from the game, and the hold time keeps a quick
+// accidental press of the buttons from opening it.
+REXCVAR_DEFINE_STRING(skate3_menu_pad_chord, "lb+rb+back", "Skate 3",
+                      "Controller buttons held together to open the settings screen, joined "
+                      "by '+': a, b, x, y, lb, rb, lt, rt (trigger over half way), l3, r3, back, "
+                      "start, up, down, left, right. Empty disables it.");
+REXCVAR_DEFINE_INT32(skate3_menu_pad_hold_ms, 1000, "Skate 3",
+                     "How long skate3_menu_pad_chord must be held to open the settings screen")
+    .range(0, 10000);
 
 namespace {
+
+// Triggers act as buttons above this value (0-255) for the hold-chord.
+constexpr uint8_t kPadChordTriggerThreshold = 128;
+constexpr uint32_t kPadChordLT = 1u << 16;
+constexpr uint32_t kPadChordRT = 1u << 17;
+
+// "lb+rb+back" -> button mask, triggers in bits 16/17 (0 = off or nothing
+// recognised).
+uint32_t PadChordMask(std::string_view spec) {
+  uint32_t mask = 0;
+  std::string token;
+  for (size_t i = 0; i <= spec.size(); ++i) {
+    const char c = i < spec.size() ? spec[i] : '+';
+    if (c != '+' && c != ',' && c != ' ') {
+      token.push_back(char(std::tolower(static_cast<unsigned char>(c))));
+      continue;
+    }
+    if (token == "a") mask |= rex::input::X_INPUT_GAMEPAD_A;
+    else if (token == "b") mask |= rex::input::X_INPUT_GAMEPAD_B;
+    else if (token == "x") mask |= rex::input::X_INPUT_GAMEPAD_X;
+    else if (token == "y") mask |= rex::input::X_INPUT_GAMEPAD_Y;
+    else if (token == "lb") mask |= rex::input::X_INPUT_GAMEPAD_LEFT_SHOULDER;
+    else if (token == "rb") mask |= rex::input::X_INPUT_GAMEPAD_RIGHT_SHOULDER;
+    else if (token == "lt") mask |= kPadChordLT;
+    else if (token == "rt") mask |= kPadChordRT;
+    else if (token == "l3") mask |= rex::input::X_INPUT_GAMEPAD_LEFT_THUMB;
+    else if (token == "r3") mask |= rex::input::X_INPUT_GAMEPAD_RIGHT_THUMB;
+    else if (token == "back" || token == "view" || token == "select")
+      mask |= rex::input::X_INPUT_GAMEPAD_BACK;
+    else if (token == "start" || token == "menu") mask |= rex::input::X_INPUT_GAMEPAD_START;
+    else if (token == "up" || token == "dpad_up") mask |= rex::input::X_INPUT_GAMEPAD_DPAD_UP;
+    else if (token == "down" || token == "dpad_down")
+      mask |= rex::input::X_INPUT_GAMEPAD_DPAD_DOWN;
+    else if (token == "left" || token == "dpad_left")
+      mask |= rex::input::X_INPUT_GAMEPAD_DPAD_LEFT;
+    else if (token == "right" || token == "dpad_right")
+      mask |= rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT;
+    token.clear();
+  }
+  return mask;
+}
+
+// Hold tracking per pad slot. Fed with the pad state the game reads (after
+// background isolation and any input script), on the polling guest thread;
+// the SDK serializes the calls. While the settings screen is open the game
+// is fed a zeroed pad, so the chord reads as released there: it fires once
+// per hold and only after a release, and never acts inside the screen.
+struct PadHoldChord {
+  struct Slot {
+    bool armed = false;  // set by a poll without the chord held
+    bool holding = false;
+    std::chrono::steady_clock::time_point since;
+  };
+  Slot slots[4];
+
+  bool Update(uint32_t user_index, const rex::input::X_INPUT_GAMEPAD& pad) {
+    if (user_index >= 4) return false;
+    Slot& s = slots[user_index];
+    const uint32_t mask = PadChordMask(REXCVAR_GET(skate3_menu_pad_chord));
+    uint32_t held = static_cast<uint16_t>(pad.buttons);
+    if (pad.left_trigger >= kPadChordTriggerThreshold) held |= kPadChordLT;
+    if (pad.right_trigger >= kPadChordTriggerThreshold) held |= kPadChordRT;
+    if (mask == 0 || (held & mask) != mask) {
+      s.armed = true;
+      s.holding = false;
+      return false;
+    }
+    if (!s.armed) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (!s.holding) {
+      s.holding = true;
+      s.since = now;
+    }
+    const int hold_ms = std::max(0, REXCVAR_GET(skate3_menu_pad_hold_ms));
+    if (now - s.since < std::chrono::milliseconds(hold_ms)) return false;
+    s.armed = false;
+    s.holding = false;
+    return true;
+  }
+};
+PadHoldChord g_menu_pad_chord;
 
 void ApplyDemoPathProfileOverride() {
   if (!rex::cvar::Query<bool>("skate3_demo_path") &&
@@ -763,6 +855,22 @@ void Skate3BaseApp::OnPostSetup() {
     input_system->SetMenuChordCallback([this]() {
       app_context().CallInUIThreadDeferred([this]() { ToggleSimpleSettings(); });
     });
+    // Hold-chord (skate3_menu_pad_chord, default LB+RB+Back for 1 s): opens
+    // the settings screen; closing stays with the screen's own B / Close.
+    input_system->SetGuestPadObserver(
+        [this](uint32_t user_index, const rex::input::X_INPUT_GAMEPAD& pad) {
+          if (!g_menu_pad_chord.Update(user_index, pad)) {
+            return;
+          }
+          app_context().CallInUIThreadDeferred([this]() {
+            if (simple_settings_dialog_ && simple_settings_dialog_->visible()) {
+              return;
+            }
+            REXLOG_INFO("Settings opened by controller hold ({})",
+                        REXCVAR_GET(skate3_menu_pad_chord));
+            ToggleSimpleSettings();
+          });
+        });
   }
 
   if (std::getenv("SKATE3_DISABLE_BIG_ALIASES") == nullptr) {
@@ -814,6 +922,11 @@ void Skate3BaseApp::OnPostSetup() {
 }
 
 void Skate3BaseApp::OnShutdown() {
+  if (auto* rt = runtime()) {
+    if (auto* input_system = static_cast<rex::input::InputSystem*>(rt->input_system())) {
+      input_system->SetGuestPadObserver(nullptr);
+    }
+  }
   rex::ui::UnregisterBind("bind_skate3_menu");
   rex::ui::UnregisterBind("bind_skate3_menu_alt");
   rex::ui::UnregisterBind("bind_skate3_save_draw_fingerprints");

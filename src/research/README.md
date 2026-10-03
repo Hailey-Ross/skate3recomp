@@ -85,6 +85,26 @@ The trace's first line is `CLOCK 0.0 <unix ms>`, which aligns trace time with wa
 adds the trace writer (`include/rex/audio/audio_trace.h`), scripted/recorded pad input
 (`include/rex/input/input_script.h`), trace points for file reads, XMA decoding and the audio output, and the
 background-window option; it also comments out two `RasterizerGamma` lines that the public imgui pin lacks.
+It also adds `InputSystem::SetGuestPadObserver`, which hands the app the pad state the game receives (after
+the background isolation and any input script); `src/skate3_app_common.cpp` uses it for the settings hold-chord
+below.
+
+## Controller: open the settings / quit
+
+Holding **LB + RB + Back for 1 second** opens the settings screen (the same one as Escape / F1), so a controller
+alone can reach it, for example from a couch over Steam Link. In the settings screen the controller navigates
+(D-pad / left stick, A select, B back); **Close Game** under the categories quits to the desktop. The chord fires
+once per hold, only after its buttons have been released since the last time, and only opens the screen (B or
+Close Settings closes it).
+
+- `skate3_menu_pad_chord` (default `lb+rb+back`): buttons joined by `+`: `a b x y lb rb lt rt l3 r3 back start
+  up down left right` (`lt`/`rt` count as held over half way). Empty disables it.
+- `skate3_menu_pad_hold_ms` (default `1000`): how long the chord must be held.
+
+No button is taken from the game: it still sees the chord's buttons while they are held. With the default chord,
+Back opens the game's Instant Replay underneath, and LB / RB move through it until the settings screen opens.
+The chord reads the same pad state the game does, so an input script step such as `1500 lb rb back` triggers
+it too. The SDK's own `menu_chord` (default `rb+start`, no hold) is unchanged.
 
 ## Credits
 
