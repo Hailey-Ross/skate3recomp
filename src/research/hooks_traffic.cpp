@@ -18,6 +18,7 @@
 //            obj+52, pos R+48, fwd R+112, R+144 / R+148 / R+152 floats, horn = R+156, skid = R+160, rel176 = R+176
 //            (slewed relative speed), listener = *(0x830CFDD4)+0. Per object at most every 250 ms, and at once
 //            when horn, skid, key or patch change. "-1" / "nan" where a read is not possible.
+//   VEHHIT / VEHALARMSTOP / VEHPARK: the car alarm trigger (2026-10-04), see the end of the file.
 #include "trace_common.h"
 
 #include <unordered_set>
@@ -119,3 +120,78 @@ FIRST_PASS_HOOK(824D6110, "traffic", "TRAFENGINE", "")
 FIRST_PASS_HOOK(826B1540, "traffic", "TRAFLIGHT", "")
 FIRST_PASS_HOOK(82E156D8, "traffic", "TRAFPHASE", "")
 FIRST_PASS_HOOK(826ABF98, "traffic", "PEDHONKED", "")
+
+// Car alarm trigger (2026-10-04, category `traffic`). The vehicle's collision callback sub_82C3C150 (slot +32 of the
+// interface at vehicle+136, vtable 0x82322218): while the StayingParked flag (+3424 bit 0x80) is set and the length
+// of the message's vector at msg+48 exceeds the vehicle_characteristics threshold (default 0.1), it sets the alarm
+// flag (+3424 bit 0x10) and zeroes the alarm timer +3716 and the parked timer +3712. Logged per call, at most every
+// 100 ms per vehicle unless the flags change:
+//   VEHHIT   <ms> vehicle | flags +3424 before after | |v48| | v48 x y z | p32 x y z | msg+64 | msg+76 | other +32 |
+//            alarm +3716 before | parked +3712 before | msg bytes 0..47 (hex) | caller chain
+// StopAlarming's action sub_82C3B4E8 (clears bit 0x10) and StayingParked's begin / end (sub_82C39120 sets bit 0x80,
+// sub_82C391F0 clears it), r4+4 = the vehicle:
+//   VEHALARMSTOP <ms> vehicle | alarm +3716 | flags +3424 after
+//   VEHPARK      <ms> vehicle | 1 enter / 0 exit | flags +3424 after | parked +3712 | alarm +3716
+namespace {
+std::mutex g_hit_mutex;
+std::unordered_map<uint32_t, uint64_t> g_hit_last;
+}  // namespace
+
+extern "C" REX_FUNC(sub_82C3C150) {
+  const uint32_t self = ctx.r3.u32, msg = ctx.r4.u32;
+  const uint32_t vehicle = self - 136;
+  const bool on = On("traffic") && Plausible(self) && Readable(base, vehicle, 4404) && Readable(base, msg, 80);
+  uint8_t before = 0;
+  float alarm = NAN, parked = NAN;
+  char callers[64] = "-";
+  if (on) {
+    before = base[vehicle + 3424];
+    alarm = LoadF32(base, vehicle + 3716);
+    parked = LoadF32(base, vehicle + 3712);
+    CallerChain(ctx, base, callers);
+  }
+  __imp__sub_82C3C150(ctx, base);
+  if (!on || !Readable(base, vehicle, 4404)) return;
+  const uint8_t after = base[vehicle + 3424];
+  {
+    std::lock_guard<std::mutex> lock(g_hit_mutex);
+    uint64_t& last = g_hit_last[vehicle];
+    const uint64_t now = GetTickCount64();
+    if (after == before && now - last < 100) return;
+    last = now;
+  }
+  const float x = LoadF32(base, msg + 48), y = LoadF32(base, msg + 52), z = LoadF32(base, msg + 56);
+  char point[64], raw[97];
+  Vec3Text(base, msg + 32, point, sizeof point);
+  HexAt(base, msg, raw);
+  const uint32_t other = LoadU32(base, msg + 76);
+  rex::audio_trace::line("VEHHIT", "%08X\t%02X %02X\t%.4f\t%.4f %.4f %.4f\t%s\t%08X\t%08X\t%08X\t%.4f\t%.4f\t%s\t%s", vehicle,
+                         before, after, std::sqrt(x * x + y * y + z * z), x, y, z, point, LoadU32(base, msg + 64), other,
+                         Plausible(other) ? TryU32(base, other + 32, 0xFFFFFFFFu) : 0xFFFFFFFFu, alarm, parked, raw,
+                         callers);
+}
+
+extern "C" REX_FUNC(sub_82C3B4E8) {
+  const uint32_t vehicle = Readable(base, ctx.r4.u32, 8) ? LoadU32(base, ctx.r4.u32 + 4) : 0;
+  __imp__sub_82C3B4E8(ctx, base);
+  if (!On("traffic") || !Readable(base, vehicle, 4404)) return;
+  rex::audio_trace::line("VEHALARMSTOP", "%08X\t%.4f\t%02X", vehicle, LoadF32(base, vehicle + 3716), base[vehicle + 3424]);
+}
+
+static void LogPark(uint8_t* base, uint32_t vehicle, int enter) {
+  if (!On("traffic") || !Readable(base, vehicle, 4404)) return;
+  rex::audio_trace::line("VEHPARK", "%08X\t%d\t%02X\t%.4f\t%.4f", vehicle, enter, base[vehicle + 3424],
+                         LoadF32(base, vehicle + 3712), LoadF32(base, vehicle + 3716));
+}
+
+extern "C" REX_FUNC(sub_82C39120) {
+  const uint32_t vehicle = Readable(base, ctx.r4.u32, 8) ? LoadU32(base, ctx.r4.u32 + 4) : 0;
+  __imp__sub_82C39120(ctx, base);
+  LogPark(base, vehicle, 1);
+}
+
+extern "C" REX_FUNC(sub_82C391F0) {
+  const uint32_t vehicle = Readable(base, ctx.r4.u32, 8) ? LoadU32(base, ctx.r4.u32 + 4) : 0;
+  __imp__sub_82C391F0(ctx, base);
+  LogPark(base, vehicle, 0);
+}
