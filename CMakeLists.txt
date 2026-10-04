@@ -249,6 +249,7 @@ set(SKATE3_COMMON_SOURCES
     src/research/hooks_npc.cpp
     src/research/hooks_traffic.cpp
     src/research/hooks_queue.cpp
+    src/research/hooks_marker.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp

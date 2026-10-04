@@ -41,6 +41,7 @@ hooks reference functions only by address and read fields by offset.
 | `hooks_npc.cpp` | `npc` | pedestrian/vehicle population, mood reactions (MOODOUT), named per-pedestrian timers (PEDTIMER), chases, takedowns, tazers, positions (PEDXYZ, PEDSEE), pedestrian audio state per instance (PEDAUD) |
 | `hooks_traffic.cpp` | `traffic` | vehicle driving state and position (VEHSTATE), vehicle audio record per engine instance (VEHAUD), horns, skids, traffic lights |
 | `hooks_queue.cpp` | `audio` | the audio command queue: growth at start (QGROW), a watchdog every 100 ms (QSTAT) |
+| `hooks_marker.cpp` | `audiox` | session-marker returns and the teleport flow: the request with its distance and hold time (TPMARK), the streamed-or-load decision (TPDEC, TPSTREAM), the teleport screen effect amount (TPFX), every front-end sound request (FEREQ), state changes and state events (GSTATE, GEVENT, rate-limited) and posted hub messages (HUBMSG, two per second per id) |
 | `hooks_watch.cpp` | `watch` | a watch list of guest memory read from a file, logged on change |
 | `sdk/rexglue-sdk-research.patch` | — | the SDK side (see below) |
 
