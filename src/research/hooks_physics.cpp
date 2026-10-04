@@ -1,5 +1,5 @@
 // Research hooks (tracing tools; not intended for the upstream project): physics probes (ground jump, board
-// contacts, constraint solver). Category: SKATE3_TRACE=physics (src/research/trace_common.h).
+// contacts, constraint solver, solver iteration count ITERSET/ITERTICK). Category: SKATE3_TRACE=physics (src/research/trace_common.h).
 
 #include "trace_common.h"
 
@@ -214,4 +214,89 @@ extern "C" REX_FUNC(sub_82DC2840) {
     rex::audio_trace::line("SIMSETUP", "%08X\tcfg16=%u\tsim=%08X\tsim176=%u", owner, cfg16, sim,
                            Plausible(sim) ? LoadU32(base, sim + 176) : 0);
   }
+}
+
+// Solver iteration count writer (82763E00: r3 = owner; Simulation = *(*(owner + 12))). It stores 50 into
+// Simulation+176 when the owner's mode word (+8) is 3, else 25. Called from the frame update 82859E70 for
+// two owners (lr 8285A1E8 = slot 0 = *(*(game + 188) + 8), lr 8285A1F8 = slot 1 = *(... + 12)). Logged per
+// owner when (mode, count) changes, plus a 1 Hz heartbeat; `calls` = calls of that owner since its last line.
+//   ITERSET <ms> owner slot mode sim before after calls why(1 change, 2 heartbeat, 4 first) chain
+// The frame update itself, once a second: number of calls by flag bits r4 & 3 and the game byte +145.
+//   ITERTICK <ms> game calls f0 f1 f2 f3 b145
+namespace {
+struct IterOwner {
+  uint32_t owner, mode, after, calls;
+  uint64_t last;
+};
+std::mutex g_iter_mutex;
+IterOwner g_iter[8];
+int g_iter_count = 0;
+}  // namespace
+extern "C" REX_FUNC(sub_82763E00) {
+  if (!On("physics") || !Plausible(ctx.r3.u32)) {
+    __imp__sub_82763E00(ctx, base);
+    return;
+  }
+  const uint32_t owner = ctx.r3.u32;
+  const uint32_t lr = static_cast<uint32_t>(ctx.lr);
+  const int slot = lr == 0x8285A1E8u ? 0 : lr == 0x8285A1F8u ? 1 : -1;
+  char chain[64];
+  CallerChain(ctx, base, chain);
+  const uint32_t mode = TryU32(base, owner + 8);
+  const uint32_t holder = TryU32(base, owner + 12, 0);
+  const uint32_t sim = Plausible(holder) ? TryU32(base, holder, 0) : 0;
+  const uint32_t before = Plausible(sim) ? TryU32(base, sim + 176) : 0xFFFFFFFFu;
+  __imp__sub_82763E00(ctx, base);
+  const uint32_t after = Plausible(sim) ? TryU32(base, sim + 176) : 0xFFFFFFFFu;
+  const uint64_t now = GetTickCount64();
+  uint32_t why = 0, calls = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_iter_mutex);
+    IterOwner* e = nullptr;
+    for (int i = 0; i < g_iter_count; ++i)
+      if (g_iter[i].owner == owner) e = &g_iter[i];
+    if (!e) {
+      if (g_iter_count >= 8) return;
+      e = &g_iter[g_iter_count++];
+      *e = {owner, mode, after, 0, now};
+      why = 4;
+    }
+    ++e->calls;
+    if (e->mode != mode || e->after != after) why |= 1;
+    if (now - e->last >= 1000) why |= 2;
+    if (!why) return;
+    calls = e->calls;
+    *e = {owner, mode, after, 0, now};
+  }
+  rex::audio_trace::line("ITERSET", "%08X\t%d\t%u\t%08X\t%u\t%u\t%u\t%u\t%s", owner, slot, mode, sim, before, after,
+                         calls, why, chain);
+}
+extern "C" REX_FUNC(sub_82859E70) {
+  static std::mutex s_mutex;
+  static uint32_t s_calls[4] = {0, 0, 0, 0};
+  static uint64_t s_last = 0;
+  if (On("physics") && Plausible(ctx.r3.u32)) {
+    const uint32_t game = ctx.r3.u32;
+    const uint64_t now = GetTickCount64();
+    uint32_t c[4] = {0, 0, 0, 0};
+    bool log = false;
+    {
+      std::lock_guard<std::mutex> lock(s_mutex);
+      ++s_calls[ctx.r4.u32 & 3];
+      if (now - s_last >= 1000) {
+        log = true;
+        s_last = now;
+        for (int i = 0; i < 4; ++i) {
+          c[i] = s_calls[i];
+          s_calls[i] = 0;
+        }
+      }
+    }
+    if (log) {
+      const uint32_t b145 = Readable(base, game + 145, 1) ? base[game + 145] : 0xFFu;
+      rex::audio_trace::line("ITERTICK", "%08X\t%u\t%u\t%u\t%u\t%u\t%u", game, c[0] + c[1] + c[2] + c[3], c[0], c[1],
+                             c[2], c[3], b145);
+    }
+  }
+  __imp__sub_82859E70(ctx, base);
 }
