@@ -19,6 +19,20 @@
 //   TELELOC    <ms> r4 | r5 | name(r6) | callers                   (ToWorldFileLocation path sub_82D55280)
 //   WPKEY      <ms> layer | old key | new key | position x z       (broadcast layers, sub_82C0EA00 diff of
 //              R+2080+16*i, 19 layers; r4 = 2D position (x, z))
+//   TRIGQRY    <ms> group | entity | A x y z | B x y z | C x y z | centre x y z | axis x y z
+//              (query cylinder builder sub_82DD80B8, called per tracked entity per group update; A/B/C = the points
+//               the entity reports through its vtable +12 / +16 / +20, read from the builder's stack frame after
+//               the call; centre = output transform +48, axis = output +32. Group "other" = the second caller
+//               sub_828A80F8. At most 2 lines per second per group and entity.)
+//   TRIGENT    <ms> entity | vtable | fn +4 | fn +8 | fn +12 | fn +16 | fn +20 | words +4..+28
+//              (once per new entity vtable, from the same hook)
+//   TRIGGRP    <ms> group name | id | item +216 (the word the trigger manager sub_82DD7C58 picks the group with:
+//              1 Stairs, 2 Camera, otherwise Challenge)
+//   HULLENTER / HULLEXIT <ms> manager | hull entry | hull key | position x y z
+//              (challenge dynamic hull manager sub_82D519C0: its set diff sub_82557600 (lr 0x82D51A68) of the hull
+//               regions around the query box 82DD8030 builds on the position; key = the hull's challenge record
+//               key, *(*(*(entry+16))+24); position = the r4 vector the manager was called with)
+//   HULLENT    <ms> manager | entity (sub_82D514C0, the entity whose position drives the hull manager; on change)
 //   TELEFP     first pass (raw registers, FIRST_PASS_HOOK) on the other teleport candidates, to find the path
 //              Challenge Map > Locations uses (it bypasses TeleportPlayer): tag = function. Flow::Teleport
 //              commands sub_82864038/510/6E0/918, Flow::Teleport users sub_82898FC8 / sub_827A0490, Lua
@@ -103,7 +117,94 @@ void LogIndices(PPCContext& ctx, uint8_t* base, const char* kind, uint32_t group
   }
 }
 
+// Rate limit per (tag, entity): true at most once per `period_ms`.
+bool QueryAllow(uint32_t tag, uint32_t entity, uint64_t period_ms) {
+  struct Slot {
+    uint32_t tag, entity;
+    uint64_t last;
+  };
+  static Slot slots[64] = {};
+  static uint32_t next = 0;
+  const uint64_t now = GetTickCount64();
+  std::lock_guard<std::mutex> lock(g_mutex);
+  for (Slot& s : slots) {
+    if (s.tag == tag && s.entity == entity && s.last != 0) {
+      if (now - s.last < period_ms) return false;
+      s.last = now;
+      return true;
+    }
+  }
+  slots[next++ % 64] = {tag, entity, now};
+  return true;
+}
+
+bool NewVtable(uint32_t vtable) {
+  static uint32_t seen[64] = {};
+  static uint32_t count = 0;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  for (uint32_t i = 0; i < count && i < 64; ++i) {
+    if (seen[i] == vtable) return false;
+  }
+  if (count < 64) seen[count++] = vtable;
+  return true;
+}
+
+thread_local float t_hull_pos[3] = {NAN, NAN, NAN};
+
 }  // namespace
+
+// Query cylinder builder: r3 entity, r4 shape, r5 output transform. Its frame is 224 bytes; the entity's three
+// points land at frame +128 (vtable +12), +144 (+16) and +112 (+20) and stay there after the call returns.
+extern "C" REX_FUNC(sub_82DD80B8) {
+  const uint32_t lr = static_cast<uint32_t>(ctx.lr);
+  const uint32_t entity = ctx.r3.u32;
+  const uint32_t out = ctx.r5.u32;
+  const uint32_t frame = ctx.r1.u32 - 224;
+  __imp__sub_82DD80B8(ctx, base);
+  if (lr != 0x82DD7200 && lr != 0x828A81E8) return;
+  if (!On("world")) return;
+  // r29 is the caller's group (non-volatile, restored by the builder) for the group update caller.
+  const uint32_t tag = lr == 0x82DD7200 ? ctx.r29.u32 : 1u;
+  if (!QueryAllow(tag, entity, 500)) return;
+  char a[64], b[64], c[64], centre[64], axis[64];
+  Vec3Text(base, frame + 128, a, sizeof a);
+  Vec3Text(base, frame + 144, b, sizeof b);
+  Vec3Text(base, frame + 112, c, sizeof c);
+  Vec3Text(base, out + 48, centre, sizeof centre);
+  Vec3Text(base, out + 32, axis, sizeof axis);
+  rex::audio_trace::line("TRIGQRY", "%s\t%08X\t%s\t%s\t%s\t%s\t%s", lr == 0x82DD7200 ? GroupName(tag) : "other", entity,
+                         a, b, c, centre, axis);
+  const uint32_t vtable = TryU32(base, entity, 0);
+  if (vtable && vtable != 0xFFFFFFFFu && NewVtable(vtable)) {
+    rex::audio_trace::line("TRIGENT", "%08X\t%08X\t%08X\t%08X\t%08X\t%08X\t%08X\t%08X %08X %08X %08X %08X %08X %08X",
+                           entity, vtable, TryU32(base, vtable + 4), TryU32(base, vtable + 8), TryU32(base, vtable + 12),
+                           TryU32(base, vtable + 16), TryU32(base, vtable + 20), TryU32(base, entity + 4),
+                           TryU32(base, entity + 8), TryU32(base, entity + 12), TryU32(base, entity + 16),
+                           TryU32(base, entity + 20), TryU32(base, entity + 24), TryU32(base, entity + 28));
+  }
+}
+
+// Dynamic hull manager proximity update: r3 manager, r4 position vector.
+extern "C" REX_FUNC(sub_82D519C0) {
+  if (On("world")) {
+    const uint32_t pos = ctx.r4.u32;
+    t_hull_pos[0] = TryF32(base, pos);
+    t_hull_pos[1] = TryF32(base, pos + 4);
+    t_hull_pos[2] = TryF32(base, pos + 8);
+  }
+  __imp__sub_82D519C0(ctx, base);
+}
+
+// Dynamic hull manager update: r3 manager, r4 the entity whose position it uses.
+extern "C" REX_FUNC(sub_82D514C0) {
+  static uint32_t last = 0;
+  const uint32_t entity = ctx.r4.u32;
+  if (entity != last && On("world")) {
+    last = entity;
+    rex::audio_trace::line("HULLENT", "%08X\t%08X", ctx.r3.u32, entity);
+  }
+  __imp__sub_82D514C0(ctx, base);
+}
 
 extern "C" REX_FUNC(sub_82C9AFD8) {
   const uint32_t set = TryU32(base, ctx.r4.u32 + 20, 0);
@@ -146,6 +247,7 @@ extern "C" REX_FUNC(sub_82DD7668) {
     VolumeName(base, item, name);
     rex::audio_trace::line("TRIGADD", "%s\t%u\t%016llX\t%s\t%s", GroupName(group), ctx.r3.u32, Id(base, item), name,
                            callers);
+    rex::audio_trace::line("TRIGGRP", "%s\t%016llX\t%u", GroupName(group), Id(base, item), TryU32(base, item + 216));
   }
 }
 
@@ -162,9 +264,30 @@ extern "C" REX_FUNC(sub_82DD7018) {
 
 extern "C" REX_FUNC(sub_82557600) {
   const bool trigger = ctx.lr == 0x82DD7290;
+  const bool hull = ctx.lr == 0x82D51A68;
   const uint32_t entered = ctx.r5.u32;
   const uint32_t exited = ctx.r6.u32;
   __imp__sub_82557600(ctx, base);
+  if (hull && On("world")) {
+    // r26 = the hull manager (caller's non-volatile register); entry = *(*(manager+12) + 4*(index+16)).
+    const uint32_t mgr = ctx.r26.u32;
+    const uint32_t entries = TryU32(base, mgr + 12, 0);
+    const uint32_t vecs[2] = {entered, exited};
+    for (int k = 0; k < 2; ++k) {
+      const uint32_t begin = TryU32(base, vecs[k], 0);
+      const uint32_t end = TryU32(base, vecs[k] + 4, 0);
+      if (!entries || !begin || end <= begin || end - begin > 4 * 512) continue;
+      for (uint32_t at = begin; at < end; at += 4) {
+        const uint32_t index = TryU32(base, at, 0xFFFFFFFFu);
+        if (index >= 4096) continue;
+        const uint32_t entry = TryU32(base, entries + 4 * (index + 16), 0);
+        const uint32_t record = TryU32(base, TryU32(base, entry + 16, 0), 0);
+        const unsigned long long key = record ? static_cast<unsigned long long>(TryU64(base, record + 24, 0)) : 0ull;
+        rex::audio_trace::line(k == 0 ? "HULLENTER" : "HULLEXIT", "%08X\t%08X\t%016llX\t%.3f %.3f %.3f", mgr, entry, key,
+                               t_hull_pos[0], t_hull_pos[1], t_hull_pos[2]);
+      }
+    }
+  }
   if (trigger && On("world")) {
     // r29 (group) and r31 (entity) are the caller's non-volatile registers, unchanged across the call.
     LogIndices(ctx, base, "TRIGENTER", ctx.r29.u32, entered);
