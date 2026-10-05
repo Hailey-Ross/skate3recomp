@@ -127,7 +127,8 @@ FIRST_PASS_HOOK(826ABF98, "traffic", "PEDHONKED", "")
 // flag (+3424 bit 0x10) and zeroes the alarm timer +3716 and the parked timer +3712. Logged per call, at most every
 // 100 ms per vehicle unless the flags change:
 //   VEHHIT   <ms> vehicle | flags +3424 before after | |v48| | v48 x y z | p32 x y z | msg+64 | msg+76 | other +32 |
-//            alarm +3716 before | parked +3712 before | msg bytes 0..47 (hex) | caller chain
+//            alarm +3716 after | parked +3712 after | msg bytes 0..47 (hex) | caller chain ("-" for an
+//            alarm-flag change inside the 100 ms gate). The hot path reads only the flag byte and the gate.
 // StopAlarming's action sub_82C3B4E8 (clears bit 0x10) and StayingParked's begin / end (sub_82C39120 sets bit 0x80,
 // sub_82C391F0 clears it), r4+4 = the vehicle:
 //   VEHALARMSTOP <ms> vehicle | alarm +3716 | flags +3424 after
@@ -140,25 +141,30 @@ std::unordered_map<uint32_t, uint64_t> g_hit_last;
 extern "C" REX_FUNC(sub_82C3C150) {
   const uint32_t self = ctx.r3.u32, msg = ctx.r4.u32;
   const uint32_t vehicle = self - 136;
-  const bool on = On("traffic") && Plausible(self) && Readable(base, vehicle, 4404) && Readable(base, msg, 80);
-  uint8_t before = 0;
-  float alarm = NAN, parked = NAN;
-  char callers[64] = "-";
-  if (on) {
-    before = base[vehicle + 3424];
-    alarm = LoadF32(base, vehicle + 3716);
-    parked = LoadF32(base, vehicle + 3712);
-    CallerChain(ctx, base, callers);
+  // Cars touch the road every physics step, so this runs very often: the hot path only reads the
+  // alarm flag and the per-car time gate. The guarded reads, the caller chain and the line itself
+  // happen only for logged calls (an alarm-flag change, or at most one line per car per 100 ms).
+  if (!On("traffic") || !Plausible(self) || !Plausible(vehicle + 3424)) {
+    __imp__sub_82C3C150(ctx, base);
+    return;
   }
-  __imp__sub_82C3C150(ctx, base);
-  if (!on || !Readable(base, vehicle, 4404)) return;
-  const uint8_t after = base[vehicle + 3424];
+  const uint64_t now = GetTickCount64();
+  bool due;
   {
     std::lock_guard<std::mutex> lock(g_hit_mutex);
-    uint64_t& last = g_hit_last[vehicle];
-    const uint64_t now = GetTickCount64();
-    if (after == before && now - last < 100) return;
-    last = now;
+    due = now - g_hit_last[vehicle] >= 100;
+  }
+  const uint8_t before = base[vehicle + 3424];
+  char callers[64] = "-";
+  if (due) CallerChain(ctx, base, callers);
+  __imp__sub_82C3C150(ctx, base);
+  const uint8_t after = base[vehicle + 3424];
+  if (after == before && !due) return;
+  if (!Readable(base, vehicle, 4404) || !Readable(base, msg, 80)) return;
+  const float alarm = LoadF32(base, vehicle + 3716), parked = LoadF32(base, vehicle + 3712);
+  {
+    std::lock_guard<std::mutex> lock(g_hit_mutex);
+    g_hit_last[vehicle] = now;
   }
   const float x = LoadF32(base, msg + 48), y = LoadF32(base, msg + 52), z = LoadF32(base, msg + 56);
   char point[64], raw[97];
