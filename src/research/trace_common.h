@@ -137,7 +137,7 @@ inline void NameAt(uint8_t* base, uint32_t addr, char (&out)[33]) {
 // no allocation (previously two std::string concatenations per call, on hooks called thousands of times a
 // second). Unknown categories are treated like the old substring match, computed on the fly.
 inline bool On(const char* category) {
-  static const char* const kKnown[] = {"audio", "audiox", "dsp", "dspmod", "physics", "world", "npc", "traffic", "skitch", "aiskater", "watch", "loadscreen"};
+  static const char* const kKnown[] = {"audio", "audiox", "dsp", "dspmod", "physics", "world", "npc", "traffic", "skitch", "aiskater", "watch", "loadscreen", "render"};
   constexpr int kCount = sizeof kKnown / sizeof kKnown[0];
   struct Table {
     bool enabled = false;

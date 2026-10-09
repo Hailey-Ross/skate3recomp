@@ -409,7 +409,13 @@ extern "C" REX_FUNC(sub_82795AD8) {
 // sub_827FAF50(r3 = SceneRenderView*, r4 = eastl vector of 8-byte
 // {sort_key, MeshContext*} entries, r5 = first, r6 = count). Called from
 // SceneRenderView::Render (82 7FB158) for each of the view's key lists.
+namespace skate3_research {
+void DrawOrderList(uint8_t* base, uint32_t view, uint32_t list, uint32_t first, uint32_t count, PPCContext& ctx);
+void RenderFrameBoundary(uint8_t* base);
+}  // namespace skate3_research
+
 extern "C" REX_FUNC(sub_827FAF50) {
+  skate3_research::DrawOrderList(base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx);
   if (skate3::native_render::Enabled()) {
     skate3::native_render::OnSceneDrawList(base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
                                            ctx.r6.u32);
@@ -432,6 +438,7 @@ extern "C" REX_FUNC(sub_827FAF50) {
 
 // Guest D3D Swap: frame boundary.
 extern "C" REX_FUNC(sub_82B82E08) {
+  skate3_research::RenderFrameBoundary(base);
   if (skate3::native_render::Enabled()) {
     skate3::native_render::OnFrameEnd(base);
   }
