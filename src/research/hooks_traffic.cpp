@@ -6,6 +6,14 @@
 //            +3424 +4403 | alarm +3716 | planner f1 f2
 //            (speed planner sub_82C3FA08, r3 = vehicle; per vehicle at most every 250 ms, and on any change of
 //            manoeuvre / target lane) | position x y z | forward x y z (world matrix *(vehicle+164)+16)
+//   VEHCONN  <ms> vehicle | why (1 junction state, 2 segment index, 4 lane, 8 segment id, 16 first sight) |
+//            junction state +4392 old new | segment index +4388 old new | lane +4376 old new | segment id +4144
+//            (u64 hex) | +4136 (u64 hex) | target lane +4380 | manoeuvre +4396 | distance +3640 | speed +3412 |
+//            accel +3408 | flags +4402 +4403 | position x y z | forward x y z   (17 fields; 2026-10-05)
+//            From the same planner hook as VEHSTATE, logged only when one of the four values changes. The
+//            junction state is the result of the junction query sub_82E11E90 that the driving states store; the
+//            segment index is the next segment FollowingLane (sub_82C376E8) picks at a junction (scored or random),
+//            i.e. the turn choice. Mover slots: +68 distance, +72 segment id, +76 segment index, +84 lane.
 //   VEHVT    <ms> vehicle | component +144 vtable | slots +36 +56 +88 (once per vtable: position getter search)
 //   TRAFHORN / TRAFSKID / TRAFENGINE / TRAFLIGHT / TRAFPHASE / PEDHONKED: first pass (FIRST_PASS_HOOK):
 //            horn SFXObj sub_824D6BE8, skids sub_824D7440, engine sub_824D6110, lights sub_826B1540, light phase
@@ -30,6 +38,10 @@ std::mutex g_mutex;
 struct VehicleLast {
   uint64_t ms = 0;
   uint32_t manoeuvre = 0xFFFFFFFF, lane = 0xFFFFFFFF;
+  // VEHCONN: junction state +4392, segment index +4388, current lane +4376, segment id +4144.
+  bool seen = false;
+  uint32_t junction = 0xFFFFFFFF, segment = 0xFFFFFFFF, cur_lane = 0xFFFFFFFF;
+  uint64_t segment_id = ~0ull;
 };
 std::unordered_map<uint32_t, VehicleLast> g_last;
 std::unordered_set<uint32_t> g_vtables;
@@ -42,7 +54,11 @@ extern "C" REX_FUNC(sub_82C3FA08) {
   if (!On("traffic") || !Readable(base, vehicle, 4404)) return;
   const uint32_t manoeuvre = LoadU32(base, vehicle + 4396), lane = LoadU32(base, vehicle + 4380);
   const uint32_t vtable = LoadU32(base, vehicle + 144);
+  const uint32_t junction = LoadU32(base, vehicle + 4392), segment = LoadU32(base, vehicle + 4388);
+  const uint32_t cur_lane = LoadU32(base, vehicle + 4376);
+  const uint64_t segment_id = LoadU64(base, vehicle + 4144);
   bool log = false, new_vtable = false;
+  uint32_t conn_why = 0, old_junction = 0, old_segment = 0, old_lane = 0;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     VehicleLast& last = g_last[vehicle];
@@ -53,7 +69,33 @@ extern "C" REX_FUNC(sub_82C3FA08) {
       last.manoeuvre = manoeuvre;
       last.lane = lane;
     }
+    if (!last.seen) conn_why |= 16;
+    if (junction != last.junction) conn_why |= 1;
+    if (segment != last.segment) conn_why |= 2;
+    if (cur_lane != last.cur_lane) conn_why |= 4;
+    if (segment_id != last.segment_id) conn_why |= 8;
+    old_junction = last.junction;
+    old_segment = last.segment;
+    old_lane = last.cur_lane;
+    last.seen = true;
+    last.junction = junction;
+    last.segment = segment;
+    last.cur_lane = cur_lane;
+    last.segment_id = segment_id;
     new_vtable = g_vtables.insert(vtable).second;
+  }
+  if (conn_why != 0) {
+    const uint32_t matrix = TryU32(base, vehicle + 164, 0) + 16;
+    char pos[64], fwd[64];
+    Vec3Text(base, matrix + 48, pos, sizeof pos);
+    Vec3Text(base, matrix + 32, fwd, sizeof fwd);
+    rex::audio_trace::line("VEHCONN", "%08X\t%u\t%d %d\t%d %d\t%d %d\t%016llX\t%016llX\t%d\t%u\t%.3f\t%.3f\t%.3f\t%02X %02X\t%s\t%s",
+                           vehicle, conn_why, static_cast<int>(old_junction), static_cast<int>(junction),
+                           static_cast<int>(old_segment), static_cast<int>(segment), static_cast<int>(old_lane),
+                           static_cast<int>(cur_lane), static_cast<unsigned long long>(segment_id),
+                           static_cast<unsigned long long>(LoadU64(base, vehicle + 4136)), static_cast<int>(lane),
+                           manoeuvre, LoadF32(base, vehicle + 3640), LoadF32(base, vehicle + 3412),
+                           LoadF32(base, vehicle + 3408), base[vehicle + 4402], base[vehicle + 4403], pos, fwd);
   }
   if (new_vtable) {
     rex::audio_trace::line("VEHVT", "%08X\t%08X\t%08X %08X %08X", vehicle, vtable, TryU32(base, vtable + 36),

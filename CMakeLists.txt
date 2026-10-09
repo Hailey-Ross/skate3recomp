@@ -250,6 +250,11 @@ set(SKATE3_COMMON_SOURCES
     src/research/hooks_traffic.cpp
     src/research/hooks_queue.cpp
     src/research/hooks_marker.cpp
+    src/research/hooks_vehicles.cpp
+    src/research/hooks_cas.cpp
+    src/research/hooks_grind.cpp
+    src/research/hooks_feinput.cpp
+    src/research/hooks_loadscreen.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp

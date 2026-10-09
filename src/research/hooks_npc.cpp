@@ -239,3 +239,25 @@ NPC_HOOK(826AEE80, "SECZONE", "return\t")
 NPC_HOOK(82C9B3A0, "AISTREAM", "82C9B3A0\t")
 NPC_HOOK(82C9B250, "AISTREAM", "82C9B250\t")
 NPC_HOOK(82C9B4F0, "AISTREAM", "82C9B4F0\t")
+// PEDCOLL <ms> | ped | vtable | vtable+212 | brain | brain+3196 before | after | ped+2496 | ped+2500 | callers
+// The pedestrian collision reaction setup sub_8269D8A8 (PedestrianColliding): ped+2496 / +2500 are the reaction
+// kind and direction it leaves behind; vtable+212 is the virtual that decides them. One line per call (rare).
+extern "C" REX_FUNC(sub_8269D8A8) {
+  const bool on = On("npc");
+  const uint32_t ped = ctx.r3.u32;
+  uint32_t vt = 0, slot = 0, brain = 0, before = 0xFFFFFFFFu;
+  char callers[64] = "-";
+  if (on && Readable(base, ped, 5900)) {
+    vt = LoadU32(base, ped);
+    slot = Readable(base, vt + 212, 4) ? LoadU32(base, vt + 212) : 0;
+    brain = LoadU32(base, ped + 5896);
+    if (Readable(base, brain, 3200)) before = base[brain + 3196];
+    CallerChain(ctx, base, callers);
+  }
+  __imp__sub_8269D8A8(ctx, base);
+  if (!on || !Readable(base, ped, 5900)) return;
+  const uint32_t after = Readable(base, brain, 3200) ? base[brain + 3196] : 0xFFFFFFFFu;
+  rex::audio_trace::line("PEDCOLL", "%08X\t%08X\t%08X\t%08X\t%02X\t%02X\t%d\t%d\t%s", ped, vt, slot, brain,
+                         before, after, static_cast<int>(LoadU32(base, ped + 2496)),
+                         static_cast<int>(LoadU32(base, ped + 2500)), callers);
+}

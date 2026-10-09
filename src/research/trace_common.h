@@ -2,7 +2,7 @@
 // (src/research/hooks_*.cpp). All hooks write to one trace file with one time base
 // (rex/audio/audio_trace.h: SKATE3_AUDIO_TRACE_FILE, SKATE3_AUDIO_TRACE_T0).
 //
-// Categories: SKATE3_TRACE=audio,audiox,dsp,physics,world,npc,traffic,aiskater,watch (comma list) limits which hooks log; unset or
+// Categories: SKATE3_TRACE=audio,audiox,dsp,physics,world,npc,traffic,skitch,aiskater,watch (comma list) limits which hooks log; unset or
 // empty = all. Every read through a pointer whose meaning is inferred must be guarded (Readable /
 // Try*): an unguarded read crashed the recomp on 2026-10-02.
 #pragma once
@@ -137,7 +137,7 @@ inline void NameAt(uint8_t* base, uint32_t addr, char (&out)[33]) {
 // no allocation (previously two std::string concatenations per call, on hooks called thousands of times a
 // second). Unknown categories are treated like the old substring match, computed on the fly.
 inline bool On(const char* category) {
-  static const char* const kKnown[] = {"audio", "audiox", "dsp", "dspmod", "physics", "world", "npc", "traffic", "aiskater", "watch"};
+  static const char* const kKnown[] = {"audio", "audiox", "dsp", "dspmod", "physics", "world", "npc", "traffic", "skitch", "aiskater", "watch", "loadscreen"};
   constexpr int kCount = sizeof kKnown / sizeof kKnown[0];
   struct Table {
     bool enabled = false;

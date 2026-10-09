@@ -51,6 +51,8 @@ one file.
 | Trigger volumes, teleports, world-painter keys | `world` |
 | Pedestrians, moods, chases | `npc` |
 | Vehicles, horns, traffic lights | `traffic` |
+| Junctions: light phases per signal controller, the light each approach uses, turn choices | `traffic` (TRAFPROG, TRAFLIGHT2, VEHJUNC, VEHCONN) |
+| Skitching (grab, hold, release, the car's speed and the skater's offset) and skater-vs-car contacts and bails | `skitch` (with `traffic` for the cars' driving state) |
 | Any memory you name in a file (see section 5) | `watch` |
 
 `dsp`, `dspmod` and `audiox` add hundreds to thousands of lines a second. Keep those runs short (one or two

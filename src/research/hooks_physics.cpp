@@ -5,6 +5,11 @@
 
 using namespace skate3_research;
 
+namespace skate3_research {
+void GrindNoteSkater(uint8_t* base, uint32_t self);  // hooks_grind.cpp
+void GrindBoardPass(uint8_t* base, uint32_t board);  // hooks_grind.cpp
+}  // namespace skate3_research
+
 // Ground-jump probe (rolling-ollie jump velocity investigation). p = processed physics input;
 // the player's p was 46953EE0 in every Aletown run so far (other p values are NPC skaters).
 //   GJCALC <ms> p | out(x y z) active | flags2468 2484 2488 | v400 | v704 | n576 | p480 | up544 |
@@ -73,6 +78,7 @@ static void LogSkater(uint8_t* base, uint32_t self) {
 extern "C" REX_FUNC(sub_82D34150) {
   const uint32_t self = ctx.r3.u32;
   if (On("aiskater") && Plausible(self)) LogSkater(base, self);
+  GrindNoteSkater(base, self);
   if (On("physics") && Plausible(self)) {
     const uint32_t p = LoadU32(base, self + 16);
     if (Plausible(p)) {
@@ -126,6 +132,7 @@ std::unordered_map<uint32_t, uint64_t> g_board_last;
 extern "C" REX_FUNC(sub_82C07D20) {
   const uint32_t b = ctx.r3.u32;
   __imp__sub_82C07D20(ctx, base);
+  GrindBoardPass(base, b);
   if (On("aiskater") && Plausible(b)) {
     bool log = false;
     {

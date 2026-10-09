@@ -39,7 +39,9 @@ hooks reference functions only by address and read fields by offset.
 | `hooks_physics.cpp` | `physics`, `aiskater` | ground jump and board contact internals; the solver iteration count writer and its owner mode (ITERSET, ITERTICK); `aiskater`: every skater's board (player and NPC skaters): contacts, contact point, velocity (SKATEB, SKATER) |
 | `hooks_world.cpp` | `world` | trigger volumes (stream-in, registration, enter/exit), teleports, world-painter key changes |
 | `hooks_npc.cpp` | `npc` | pedestrian/vehicle population, mood reactions (MOODOUT), named per-pedestrian timers (PEDTIMER), chases, takedowns, tazers, positions (PEDXYZ, PEDSEE), pedestrian audio state per instance (PEDAUD) |
-| `hooks_traffic.cpp` | `traffic` | vehicle driving state and position (VEHSTATE), vehicle audio record per engine instance (VEHAUD), horns, skids, traffic lights, car alarm trigger (VEHHIT collision callback, VEHALARMSTOP, VEHPARK) |
+| `hooks_traffic.cpp` | `traffic` | vehicle driving state and position (VEHSTATE), vehicle audio record per engine instance (VEHAUD), horns, skids, traffic lights, car alarm trigger (VEHHIT collision callback, VEHALARMSTOP, VEHPARK); each car's junction state, segment and lane changes, i.e. turn choices at junctions (VEHCONN) |
+| `hooks_vehicles.cpp` | `skitch`, `traffic` | `skitch`: skitching from both sides: the car's held latches with the car's speed, acceleration and speed cap and the skater's offset from the car (SKITCH), the skitch setter's calls (SKITCHCALL), the skater's state selector around Skitching (SKITCHST) and the grab candidates (SKITCHCAND), and the skater-vs-car wipeout term with its contact, limit and outcome (VEHBAIL); `traffic`: the four traffic-light controllers' phase programmes and phase changes (TRAFPROG, TRAFLIGHT2) and each car's junction query with the signal group of its approach (VEHJUNC); every hook writes one HOOKARMED line on its first call |
+| `hooks_cas.cpp` | `cas` | which character record each skater actor is built from: the actor constructor with its record slot (CASACTOR), the record id and name it resolves (CASID, CASCHAR), the character settings getter with the natural stance byte and style it returns (CASSET), and each slot record once (CASREC) |
 | `hooks_queue.cpp` | `audio` | the audio command queue: growth at start (QGROW), a watchdog every 100 ms (QSTAT) |
 | `hooks_marker.cpp` | `audiox` | session-marker returns and the teleport flow: the request with its distance and hold time (TPMARK), the streamed-or-load decision (TPDEC, TPSTREAM), the teleport screen effect amount (TPFX), every front-end sound request (FEREQ), state changes and state events (GSTATE, GEVENT, rate-limited) and posted hub messages (HUBMSG, two per second per id) |
 | `hooks_watch.cpp` | `watch` | a watch list of guest memory read from a file, logged on change |
@@ -57,7 +59,7 @@ Environment variables (all optional; nothing is traced unless `SKATE3_AUDIO_TRAC
 | Variable | Meaning |
 |---|---|
 | `SKATE3_AUDIO_TRACE_FILE` | output file (tab-separated, one event per line: `KIND <ms> fields…`) |
-| `SKATE3_TRACE` | comma list of categories to log (unset = all), e.g. `audio,dsp,npc,world,traffic,aiskater`; `audiox` adds several hundred lines a second while skating, so name it only for runs that need it |
+| `SKATE3_TRACE` | comma list of categories to log (unset = all), e.g. `audio,dsp,npc,world,traffic,aiskater` (`skitch` = skitching and car contacts); `audiox` adds several hundred lines a second while skating, so name it only for runs that need it |
 | `SKATE3_AUDIO_CAPTURE` | also record the mixed game output (stereo float32, 48 kHz); `CAPTURE` lines align it with the trace |
 | `SKATE3_WATCH` | watch-list file for `hooks_watch.cpp` |
 | `SKATE3_INPUT_SCRIPT` | play a pad input script (timed steps; see `input_script.h` in the patch) |
