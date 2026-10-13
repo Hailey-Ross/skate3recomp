@@ -34,7 +34,7 @@ hooks reference functions only by address and read fields by offset.
 
 | File | Category (`SKATE3_TRACE`) | What it logs |
 |---|---|---|
-| `trace_common.h` | — | guarded reads, caller chains, the category gate, `FIRST_PASS_HOOK` |
+| `trace_common.h` | (none) | guarded reads, caller chains, the category gate, `FIRST_PASS_HOOK` |
 | `hooks_audio.cpp` | `audio`, `audiox`, `dsp`, `dspmod` | sounds posted/played (POST, PLAY, SPLC), board contacts (CONTACT, CSET), audio state (ASTATE), the rolling grain bed (GREC), treatment state (TREAT), seam patterns and hits (SEAMPAT, SEAMHIT), the local-player test's decision per object (LOCALTEST; the per-player kinds log only the local rider, byte `[[object+28]+72]`), world-painter audio regions (WP\*) and ambience (AMB\*); `dsp`: voice gains and sends (GAIN, SEND); `dspmod`: per-voice DSP module values (MOD: pitch, filters); `audiox`: extra per-frame detail, the board state word, slip, revert and listener position (GRECX), the bail first-hit flag and its strength on change plus once a second (FIRSTHIT), the held wheel-skid packet (SKID), each active world emitter's parameter slots (EMITSLOT), and during the local player's bails the ragdoll's per-region body impacts with their velocity change, contact normal, mass and surface tag per update (BAILLOCAL, BAILSTEP, BAILREG; BAILCAND shows the local-player lookup's inputs, rate-limited), and every message posted to the collision sound manager with its poster, owner, materials and tiers (COLLPOST), and every impact-band query with the impact, tier and band edges (BANDQ), and the posts, Splice sounds and wheel-spin streams of each per-player sound object (the local rider's and the nearby NPC skater's) with the object's local flag and MixMap key (PLAYERPOST) |
 | `hooks_physics.cpp` | `physics`, `aiskater` | ground jump and board contact internals; the solver iteration count writer and its owner mode (ITERSET, ITERTICK); `aiskater`: every skater's board (player and NPC skaters): contacts, contact point, velocity (SKATEB, SKATER) |
 | `hooks_world.cpp` | `world` | trigger volumes (stream-in, registration, enter/exit), teleports, world-painter key changes |
@@ -45,7 +45,8 @@ hooks reference functions only by address and read fields by offset.
 | `hooks_queue.cpp` | `audio` | the audio command queue: growth at start (QGROW), a watchdog every 100 ms (QSTAT) |
 | `hooks_marker.cpp` | `audiox` | session-marker returns and the teleport flow: the request with its distance and hold time (TPMARK), the streamed-or-load decision (TPDEC, TPSTREAM), the teleport screen effect amount (TPFX), every front-end sound request (FEREQ), state changes and state events (GSTATE, GEVENT, rate-limited) and posted hub messages (HUBMSG, two per second per id) |
 | `hooks_watch.cpp` | `watch` | a watch list of guest memory read from a file, logged on change |
-| `sdk/rexglue-sdk-research.patch` | — | the SDK side (see below) |
+| `hooks_menus.cpp` | `menus` | the Trick Guide's 3D demo camera while its set is loaded: the final camera matrix with the field of view, the camera element values and the camera player's element words per frame (TGCAM), the matrix before and after the placement steps, the track length written from each new clip (TGFIT), property 147 lookups (TGPROP), the per-element tangent setup at track start (TGTAN, TGE87) and the render location key (TGLOC) |
+| `sdk/rexglue-sdk-research.patch` | (none) | the SDK side (see below) |
 
 Each file's header comment documents its line kinds and fields.
 
@@ -62,6 +63,7 @@ Environment variables (all optional; nothing is traced unless `SKATE3_AUDIO_TRAC
 | `SKATE3_TRACE` | comma list of categories to log (unset = all), e.g. `audio,dsp,npc,world,traffic,aiskater` (`skitch` = skitching and car contacts); `audiox` adds several hundred lines a second while skating, so name it only for runs that need it |
 | `SKATE3_AUDIO_CAPTURE` | also record the mixed game output (stereo float32, 48 kHz); `CAPTURE` lines align it with the trace |
 | `SKATE3_WATCH` | watch-list file for `hooks_watch.cpp` |
+| `SKATE3_TG_EVERY_MS` | thin the `menus` camera lines (TGCAM) to one per this many ms (unset: every frame, at most 60000 lines) |
 | `SKATE3_INPUT_SCRIPT` | play a pad input script (timed steps; see `input_script.h` in the patch) |
 | `SKATE3_INPUT_SCRIPT_AUTOSTART_MS` | start the script after gameplay has been steady this long |
 | `SKATE3_INPUT_RECORD` | record the real pad input to a script file |

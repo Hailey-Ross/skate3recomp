@@ -257,6 +257,7 @@ set(SKATE3_COMMON_SOURCES
     src/research/hooks_loadscreen.cpp
     src/research/hooks_fonts.cpp
     src/research/hooks_render.cpp
+    src/research/hooks_menus.cpp
     src/skate3_demo_path.cpp
     src/skate3_draw_distance.cpp
     src/skate3_fov.cpp
