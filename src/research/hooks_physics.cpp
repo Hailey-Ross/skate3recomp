@@ -307,3 +307,30 @@ extern "C" REX_FUNC(sub_82859E70) {
   }
   __imp__sub_82859E70(ctx, base);
 }
+
+// Category `aiskater`: an NPC skater's path controller copies the physical's hips ground-test byte (line-test entry 0,
+// [rec+32]+320) into pc+922 every call of 824660A0, and clears pc+940 when pc+922 goes from 1 to 0. pc+922 decides
+// whether the record asks for physics riding (flag bit 25) or path following. Logged per controller on change and at
+// most once a second:
+//   AIPC922 <ms> brain | pc | pc+922 | pc+940 | brain+168
+namespace {
+std::mutex g_pc922_mutex;
+std::unordered_map<uint32_t, std::pair<uint32_t, uint64_t>> g_pc922_last;
+}  // namespace
+extern "C" REX_FUNC(sub_824660A0) {
+  const uint32_t brain = ctx.r3.u32;
+  __imp__sub_824660A0(ctx, base);
+  if (!On("aiskater") || !Plausible(brain)) return;
+  const uint32_t pc = TryU32(base, brain + 96, 0);
+  if (!Readable(base, pc + 920, 24) || !Readable(base, brain + 168, 1)) return;
+  const uint32_t b922 = base[pc + 922], b940 = base[pc + 940], b168 = base[brain + 168];
+  const uint32_t key = (b922 << 16) | (b940 << 8) | b168;
+  const uint64_t now = GetTickCount64();
+  {
+    std::lock_guard<std::mutex> lock(g_pc922_mutex);
+    auto& last = g_pc922_last[pc];
+    if (last.first == key && now - last.second < 1000) return;
+    last = {key, now};
+  }
+  rex::audio_trace::line("AIPC922", "%08X\t%08X\t%u\t%u\t%u", brain, pc, b922, b940, b168);
+}

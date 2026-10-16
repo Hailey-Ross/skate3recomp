@@ -48,6 +48,7 @@ one file.
 | Pitch and filter values per voice | `audio,dsp,dspmod` (heaviest) |
 | Board state, skids, bail first hit, emitter slots per frame, body impacts during bails | `audio,audiox` |
 | Board contacts of every skater, player and NPC | `physics,aiskater` |
+| Pedestrian collision bodies (shapes, masses, when they leave the world) | `npc,pedbody` |
 | Trigger volumes, teleports, world-painter keys | `world` |
 | Pedestrians, moods, chases | `npc` |
 | Vehicles, horns, traffic lights | `traffic` |
