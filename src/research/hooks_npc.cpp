@@ -24,6 +24,8 @@
 //   SECTAZE   DrawTazer sub_826A8258, TazeWantTarget sub_826A8398
 //   SECZONE   patrol zone: EntityOfInterestIsInZone sub_826AF310, ReturnToPatrolZone sub_826AEE80
 //   AISTREAM  NPC blob stream functions sub_82C9B3A0 / sub_82C9B250 / sub_82C9B4F0
+//   PEDFACE   ped facing, position, turn / transition flags, last steering direction (mover think sub_82E2CB08 and
+//             steering getter sub_82E2D180; 2026-10-16), see the hook
 //   PEDAUD    (named, 21 fields; 2026-10-03) the pedestrian audio instance state, read after the PedestrianSFX
 //             process sub_824D8078 (r3 = the object; active instances only):
 //             obj | S = [obj+32] | id S+64 | list index | list count | flags "+68 +69 +71 +80" (bytes) |
@@ -118,6 +120,61 @@ extern "C" REX_FUNC(sub_82E3D0D8) {
     Vec3Text(base, out, p, sizeof p);
     rex::audio_trace::line("PEDXYZ", "%08X\t%s", ped, p);
   }
+}
+
+// Ped turning (2026-10-16): the ped mover's per-tick think (mover vtable 0x8232C708 slot 0x2C, r3 = the mover at
+// ped + 0x8B0; its constructor stores the ped at +4). Per ped at most every 66 ms: the facing (+0x20 of the facing
+// object *(ped + 0x7E4) + 0x50) and position (+0x30), the locomotion flags *(ped + 0x1704) +0x84 (turn) / +0x86
+// (transition) as bytes (0 = running), and the last steering direction the facing chooser read (sub_82E2D180,
+// below) with its age in ms (-1 = none yet). The ped id is PEDXYZ's (ped + 0xB0). Facing against steering over time
+// gives the steering turn rate apart from the turn clips.
+//   PEDFACE <ms> ped | fx fy fz | px py pz | turn | trans | sx sy sz | steer_age_ms
+namespace {
+struct SteerSeen {
+  float x = NAN, y = NAN, z = NAN;
+  uint64_t at = 0;
+};
+std::unordered_map<uint32_t, uint64_t> g_face_last;
+std::unordered_map<uint32_t, SteerSeen> g_steer_seen;
+std::mutex g_steer_mutex;
+constexpr uint32_t kPedMoverVtable = 0x8232C708u;
+}  // namespace
+
+// The steering direction getter (r3 = out vec, r4 = the mover): the normalised NavPower steering velocity or zero.
+extern "C" REX_FUNC(sub_82E2D180) {
+  const uint32_t out = ctx.r3.u32, mover = ctx.r4.u32;
+  __imp__sub_82E2D180(ctx, base);
+  if (!On("npc")) return;
+  const uint32_t ped = TryU32(base, mover + 4, 0);
+  if (ped == 0 || ped != mover - 0x8B0u || !Readable(base, out, 12)) return;
+  const SteerSeen seen{LoadF32(base, out), LoadF32(base, out + 4), LoadF32(base, out + 8), GetTickCount64()};
+  std::lock_guard<std::mutex> lock(g_steer_mutex);
+  g_steer_seen[ped + 0xB0u] = seen;
+}
+
+extern "C" REX_FUNC(sub_82E2CB08) {
+  const uint32_t mover = ctx.r3.u32;
+  __imp__sub_82E2CB08(ctx, base);
+  if (!On("npc")) return;
+  const uint32_t ped = mover - 0x8B0u, id = ped + 0xB0u;
+  if (!Every(g_face_last, id, 66)) return;
+  if (TryU32(base, mover, 0) != kPedMoverVtable || TryU32(base, mover + 4, 0) != ped) return;
+  const uint32_t face_holder = TryU32(base, ped + 0x7E4u, 0);
+  const uint32_t loco = TryU32(base, ped + 0x1704u, 0);
+  if (face_holder == 0 || loco == 0) return;
+  char f[64], pos[64];
+  Vec3Text(base, face_holder + 0x70u, f, sizeof f);
+  Vec3Text(base, face_holder + 0x80u, pos, sizeof pos);
+  const uint32_t flags = TryU32(base, loco + 0x84u, 0xFFFFFFFFu);
+  SteerSeen steer;
+  {
+    std::lock_guard<std::mutex> lock(g_steer_mutex);
+    const auto it = g_steer_seen.find(id);
+    if (it != g_steer_seen.end()) steer = it->second;
+  }
+  const long long age = steer.at ? static_cast<long long>(GetTickCount64() - steer.at) : -1;
+  rex::audio_trace::line("PEDFACE", "%08X\t%s\t%s\t%u\t%u\t%.4f %.4f %.4f\t%lld", id, f, pos, (flags >> 24) & 0xFFu,
+                         (flags >> 8) & 0xFFu, steer.x, steer.y, steer.z, age);
 }
 namespace {
 struct PedAudLast {
