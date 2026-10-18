@@ -15,6 +15,14 @@
 //            velocity setters).
 //   PROPWAKE <ms> raw first-pass line of sub_82C53480 (the DMO wake method, vtable 0x82322ED8 slot 23).
 //   PROPUPRIGHT / PROPGROUPWAKE: raw first-pass lines of sub_82C54BF0 (upright) and sub_82C58D00 (group wake).
+//   PROPTYPE <ms> fn | owner | owner_vtable | type | callers   (5 fields; 2026-10-17)
+//            A physics assembly made with a collision type (sub_82E0E3E8 / sub_82E0E338; r5 = the type written to
+//            assembly+0x18 and every part's +0x5C; query meshes get rejection flags 1 << type, and the walker's mask
+//            0x6000 skips types 13 and 14). fn = E3E8 or E338; owner = r3. At most 20 lines a second.
+//   PROPSETTYPE <ms> slot | object | value_130 | callers   (4 fields; 2026-10-17)
+//            The DMO's collision type switches on its +0x90 interface (vtable 0x82322ED8): slot 32 sub_82C56B00 sets
+//            type 13; slot 33 sub_82C56BA0 sets 14, or 12 when value_130 = [[object+0x108C]+4]+0x130 >= 5.5, and
+//            starts a 30 s timer. object = r3.
 #include "trace_common.h"
 
 using namespace skate3_research;
@@ -78,3 +86,45 @@ extern "C" REX_FUNC(sub_82C54618) {
 FIRST_PASS_HOOK(82C53480, "props", "PROPWAKE", "")
 FIRST_PASS_HOOK(82C54BF0, "props", "PROPUPRIGHT", "")
 FIRST_PASS_HOOK(82C58D00, "props", "PROPGROUPWAKE", "")
+
+namespace {
+void LogType(PPCContext& ctx, uint8_t* base, const char* fn) {
+  static FirstPassLimit limit;
+  uint32_t skipped = 0;
+  if (!FirstPassAllow(limit, skipped)) return;
+  char callers[64] = {};
+  CallerChain(ctx, base, callers);
+  const uint32_t owner = ctx.r3.u32;
+  rex::audio_trace::line("PROPTYPE", "%s\t%08X\t%08X\t%d\t%s", fn, owner, Follow(base, owner, 0),
+                         static_cast<int32_t>(ctx.r5.u32), callers);
+}
+
+void LogSetType(PPCContext& ctx, uint8_t* base, int slot) {
+  char callers[64] = {};
+  CallerChain(ctx, base, callers);
+  const uint32_t object = ctx.r3.u32;
+  const uint32_t record = Follow(base, Follow(base, object, 0x108C), 4);
+  const float value = (record == 0 || record == 0xFFFFFFFFu) ? -1.0f : TryF32(base, record + 0x130);
+  rex::audio_trace::line("PROPSETTYPE", "%d\t%08X\t%.3f\t%s", slot, object, value, callers);
+}
+}  // namespace
+
+extern "C" REX_FUNC(sub_82E0E3E8) {
+  if (On("props")) LogType(ctx, base, "E3E8");
+  __imp__sub_82E0E3E8(ctx, base);
+}
+
+extern "C" REX_FUNC(sub_82E0E338) {
+  if (On("props")) LogType(ctx, base, "E338");
+  __imp__sub_82E0E338(ctx, base);
+}
+
+extern "C" REX_FUNC(sub_82C56B00) {
+  if (On("props")) LogSetType(ctx, base, 32);
+  __imp__sub_82C56B00(ctx, base);
+}
+
+extern "C" REX_FUNC(sub_82C56BA0) {
+  if (On("props")) LogSetType(ctx, base, 33);
+  __imp__sub_82C56BA0(ctx, base);
+}
