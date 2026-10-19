@@ -75,6 +75,8 @@
 
 using namespace skate3_research;
 
+namespace skate3_research { void PedbodySelector(uint8_t* base, uint32_t sel, uint32_t cur, uint32_t result); }
+
 namespace {
 
 constexpr uint32_t kPassLr = 0x82C34D70;          // sub_82C34CD0 -> slot 128 (clear)
@@ -314,6 +316,7 @@ std::unordered_map<uint32_t, SelLast> g_sel;
 extern "C" REX_FUNC(sub_82D8ADE8) {
   const uint32_t sel = ctx.r3.u32, cur = ctx.r4.u32;
   __imp__sub_82D8ADE8(ctx, base);
+  if (On("pedbody")) PedbodySelector(base, sel, cur, ctx.r3.u32);
   if (!On("skitch")) return;
   const uint32_t result = ctx.r3.u32;
   Armed(g_armed_sel, "skitch_selector", static_cast<uint32_t>(ctx.lr), sel, cur, result);
