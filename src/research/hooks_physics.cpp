@@ -334,3 +334,44 @@ extern "C" REX_FUNC(sub_824660A0) {
   }
   rex::audio_trace::line("AIPC922", "%08X\t%08X\t%u\t%u\t%u", brain, pc, b922, b940, b168);
 }
+
+// Category `aiskater`: the AI spawn push and the IsBumped condition right after it (does a retail AI skater read as
+// Bumped after its spawn push? Rust engine research b194 O1).
+//   AIPUSH <ms> board | caller lr | velocity x y z
+//     82C04168 sets every board part's velocity; logged for calls from the AI hold branch 824701F8 only (its other
+//     callers are not AI spawns).
+//   BUMPQ  <ms> owner | result | after_push
+//     IsBumped 82BA7310 (owner = *(condition context + 4)): every true result, and every evaluation within 1 s
+//     after an AIPUSH (after_push 1), at most one line per owner per 30 ms.
+namespace {
+std::atomic<uint64_t> g_ai_push_ms{0};
+std::mutex g_bumpq_mutex;
+std::unordered_map<uint32_t, uint64_t> g_bumpq_last;
+}  // namespace
+extern "C" REX_FUNC(sub_82C04168) {
+  const uint32_t lr = static_cast<uint32_t>(ctx.lr);
+  if (On("aiskater") && lr >= 0x824701F8u && lr < 0x82470718u) {
+    char vel[64];
+    Vec3Text(base, ctx.r4.u32 & ~15u, vel, sizeof vel);
+    rex::audio_trace::line("AIPUSH", "%08X\t%08X\t%s", ctx.r3.u32, lr, vel);
+    g_ai_push_ms.store(GetTickCount64());
+  }
+  __imp__sub_82C04168(ctx, base);
+}
+extern "C" REX_FUNC(sub_82BA7310) {
+  const uint32_t arg = ctx.r4.u32;
+  __imp__sub_82BA7310(ctx, base);
+  if (!On("aiskater")) return;
+  const uint32_t result = ctx.r3.u32 & 1u;
+  const uint64_t now = GetTickCount64();
+  const uint32_t after = now - g_ai_push_ms.load() < 1000 ? 1u : 0u;
+  if (!result && !after) return;
+  const uint32_t owner = TryU32(base, arg + 4, 0);
+  {
+    std::lock_guard<std::mutex> lock(g_bumpq_mutex);
+    uint64_t& last = g_bumpq_last[owner];
+    if (now - last < 30) return;
+    last = now;
+  }
+  rex::audio_trace::line("BUMPQ", "%08X\t%u\t%u", owner, result, after);
+}
