@@ -109,6 +109,7 @@ extern "C" REX_FUNC(sub_82E0E730) {
 //   PCPAIR <ms> partsA | partsB | tA | tB | pA | pB | nA | nB | idA | idB | before | after | ret | onfoot_age_ms |
 //               skipped | first new contact (hex)                               (pairs that added contacts and touch
 //               the ped type, SKATE3_PCPED_TYPE, default 11)
+//   PCPOS <ms> partsA | partsB | part 0 bytes 0..191 of A (hex) | of B (hex)  (with every PCPAIR line)
 // tA / tB = record word +0xC, pA / pB = part 0 word +212 (the pair table row); the run shows which one is the group.
 // The on-foot wipeout check sub_82D90148 (r3 = the request block W, character = W+8): its inputs and the request
 // bytes it set (W+20 contact, +21 displacement, +27 vehicle, +38 squash).
@@ -180,6 +181,18 @@ extern "C" REX_FUNC(sub_8277A508) {
   rex::audio_trace::line("PCPAIR", "%08X\t%08X\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%lld\t%u\t%s", a, b, tA, tB,
                          pA, pB, nA, nB, TryU32(base, a, 0) >> 16, TryU32(base, b, 0) >> 16, before, after, ret, age,
                          skipped, contact);
+  // The two records' part 0 (224-byte parts), first 192 bytes each: the run finds the world position in them and
+  // follows the player and the ped over the contacts (does the player stop, or does the ped give way).
+  char a0[97], a1[97], a2[97], a3[97], b0[97], b1[97], b2[97], b3[97];
+  HexAt(base, a, a0);
+  HexAt(base, a + 48, a1);
+  HexAt(base, a + 96, a2);
+  HexAt(base, a + 144, a3);
+  HexAt(base, b, b0);
+  HexAt(base, b + 48, b1);
+  HexAt(base, b + 96, b2);
+  HexAt(base, b + 144, b3);
+  rex::audio_trace::line("PCPOS", "%08X\t%08X\t%s%s%s%s\t%s%s%s%s", a, b, a0, a1, a2, a3, b0, b1, b2, b3);
 }
 
 extern "C" REX_FUNC(sub_82D90148) {
