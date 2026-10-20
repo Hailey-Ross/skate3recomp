@@ -47,6 +47,9 @@ hooks reference functions only by address and read fields by offset.
 | `hooks_marker.cpp` | `audiox` | session-marker returns and the teleport flow: the request with its distance and hold time (TPMARK), the streamed-or-load decision (TPDEC, TPSTREAM), the teleport screen effect amount (TPFX), every front-end sound request (FEREQ), state changes and state events (GSTATE, GEVENT, rate-limited) and posted hub messages (HUBMSG, two per second per id) |
 | `hooks_watch.cpp` | `watch` | a watch list of guest memory read from a file, logged on change |
 | `hooks_menus.cpp` | `menus` | the Trick Guide's 3D demo camera while its set is loaded: the final camera matrix with the field of view, the camera element values and the camera player's element words per frame (TGCAM), the matrix before and after the placement steps, the track length written from each new clip (TGFIT), property 147 lookups (TGPROP), the per-element tangent setup at track start (TGTAN, TGE87) and the render location key (TGLOC) |
+| `hooks_pedstuck.cpp` | `pedstuck` | how a pedestrian that stands still gets moving again: the still timer's own obstacle (STILLOBS), the nav cut (NAVCUT), the path check (PATHOK), the re-request (PATHREQ) and the release (STILLREL) |
+| `hooks_pairtable.cpp` | `pairtable` | the collision-type bit table the world's pair jobs filter body pairs with, once per job and table (PAIRTBL), and each job input (PAIRIN) |
+| `hooks_replay.cpp` | `replay` | the replay recorder's frame commits per second (REPLAYREC) |
 | `sdk/rexglue-sdk-research.patch` | (none) | the SDK side (see below) |
 
 Each file's header comment documents its line kinds and fields.
