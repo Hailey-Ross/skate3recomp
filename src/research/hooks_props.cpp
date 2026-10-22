@@ -109,14 +109,22 @@ void LogSetType(PPCContext& ctx, uint8_t* base, int slot) {
 }
 }  // namespace
 
+namespace skate3_research {
+void DmoRowsAssembly(uint8_t* base, uint32_t cb);  // hooks_dmorows.cpp
+}
+
 extern "C" REX_FUNC(sub_82E0E3E8) {
   if (On("props")) LogType(ctx, base, "E3E8");
+  const uint32_t cb = ctx.r3.u32;
   __imp__sub_82E0E3E8(ctx, base);
+  DmoRowsAssembly(base, cb);
 }
 
 extern "C" REX_FUNC(sub_82E0E338) {
   if (On("props")) LogType(ctx, base, "E338");
+  const uint32_t cb = ctx.r3.u32;
   __imp__sub_82E0E338(ctx, base);
+  DmoRowsAssembly(base, cb);
 }
 
 extern "C" REX_FUNC(sub_82C56B00) {
