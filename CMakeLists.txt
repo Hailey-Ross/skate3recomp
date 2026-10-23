@@ -257,6 +257,7 @@ set(SKATE3_COMMON_SOURCES
     src/research/hooks_props.cpp
     src/research/hooks_queue.cpp
     src/research/hooks_marker.cpp
+    src/research/hooks_hud.cpp
     src/research/hooks_vehicles.cpp
     src/research/hooks_cas.cpp
     src/research/hooks_grind.cpp
