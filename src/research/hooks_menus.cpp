@@ -99,8 +99,11 @@ extern "C" REX_FUNC(sub_828EEA20) {
   if (id < 10 && g_open.load(std::memory_order_relaxed) && player == g_player) g_elem[id] = float(ctx.f1.f64);
 }
 
+void CamSysTrace(PPCContext& ctx, uint8_t* base);  // hooks_replay.cpp
+
 extern "C" REX_FUNC(sub_828F2C38) {
   const uint32_t m = ctx.r4.u32;
+  CamSysTrace(ctx, base);
   __imp__sub_828F2C38(ctx, base);
   if (g_open.load(std::memory_order_relaxed)) Mat(base, m, g_c38);
 }

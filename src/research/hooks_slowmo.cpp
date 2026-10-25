@@ -8,6 +8,8 @@
 //   SIMOBJ   <ms> obj | n | off:old>new,...   ([[0x83083BCC]+0x10] words changed across 82857EC8, first 0x200 bytes)
 //   SIMRESET <ms> sim | +0x80 before | +0x7C after | flags     (8285A3C0: the countdown reached 0)
 //   SIMTICK  <ms> calls | calls with flag bit 1 | +0x7C | +0x80 | sim   (8285A3C0, once a second)
+//   SMSUBJ   <ms> ctx[0] | ctx[1] subject | its vtable | subject+0x710 | ctx[3] | live Actor   (with each SMUPD, b586)
+//   CAMSUBJ  <ms> camsys | +0xA0 | its vtable | +0xA4 | [+0xA4] | [[+0xA4]+4] | skipped     (82DF68A0, rate-limited)
 #include "trace_common.h"
 
 #include <atomic>
@@ -65,9 +67,16 @@ extern "C" REX_FUNC(sub_82BB1EE0) {  // SlowMotionController Update
   const bool log = On("slowmo") && FirstPassAllow(g_upd_limit, skipped);
   const uint32_t controller = ctx.r3.u32, cx = ctx.r4.u32;
   char callers[64] = "-";
+  // b586: the context's subject (word 1) must be a live Actor (vtable 0x823004A8) with its PhysicalPlayerHiLOD at +0x710.
+  uint32_t c0 = 0, c1 = 0, c3 = 0, vt1 = 0, hilod = 0;
   if (log) {
     Armed("82BB1EE0", ctx);
     CallerChain(ctx, base, callers);
+    c0 = TryU32(base, cx, 0);
+    c1 = TryU32(base, cx + 4u, 0);
+    c3 = TryU32(base, cx + 12u, 0);
+    vt1 = Plausible(c1) ? TryU32(base, c1, 0) : 0;
+    hilod = Plausible(c1) ? TryU32(base, c1 + 0x710u, 0) : 0;
   }
   __imp__sub_82BB1EE0(ctx, base);
   if (log) {
@@ -77,7 +86,21 @@ extern "C" REX_FUNC(sub_82BB1EE0) {  // SlowMotionController Update
                            FpsAtScaleOne(base, controller), ok ? LoadF32(base, s + 8) : NAN,
                            ok ? LoadF32(base, s + 0xC) : NAN, ok ? LoadF32(base, s + 0x10) : NAN,
                            ok ? (LoadU32(base, s + 0x14) >> 24) : 0xFFu, skipped, callers);
+    rex::audio_trace::line("SMSUBJ", "%08X	%08X	%08X	%08X	%08X	%u", c0, c1, vt1, hilod, c3, vt1 == 0x823004A8u ? 1u : 0u);
   }
+}
+
+extern "C" REX_FUNC(sub_82DF68A0) {  // camera system run: follows [camsys+0xA0] (b586)
+  static FirstPassLimit limit;
+  uint32_t skipped = 0;
+  if (On("slowmo") && FirstPassAllow(limit, skipped)) {
+    const uint32_t cs = ctx.r3.u32;
+    const uint32_t a0 = TryU32(base, cs + 0xA0u, 0), a4 = TryU32(base, cs + 0xA4u, 0);
+    const uint32_t w = Plausible(a4) ? TryU32(base, a4, 0) : 0;
+    rex::audio_trace::line("CAMSUBJ", "%08X	%08X	%08X	%08X	%08X	%08X	%u", cs, a0,
+                           Plausible(a0) ? TryU32(base, a0, 0) : 0, a4, w, Plausible(w) ? TryU32(base, w + 4u, 0) : 0, skipped);
+  }
+  __imp__sub_82DF68A0(ctx, base);
 }
 
 extern "C" REX_FUNC(sub_82857EC8) {  // Simulation::OnRequestSetSimRate
