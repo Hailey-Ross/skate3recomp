@@ -1,5 +1,5 @@
 // Research hooks (tracing tools; not intended for the upstream project): session-marker returns and the teleport
-// flow behind them — distance and hold time, the streamed-or-load decision, game state changes, front-end sound
+// flow behind them: distance and hold time, the streamed-or-load decision, game state changes, front-end sound
 // requests and hub messages around a teleport. Category: SKATE3_TRACE=audiox (src/research/trace_common.h).
 //
 //   TPMARK   <ms> lr | distance | hold s | destination x y z | +80 | flags +84 +85 +86 | callers
@@ -212,6 +212,15 @@ extern "C" REX_FUNC(sub_826DB648) {
 }
 
 extern "C" REX_FUNC(sub_82B938D8) {
+  // b584: the camera SlowMotionController's sim-rate message (id 0x3FBF5E43, timestep +0x10, count +0x14).
+  if (On("slowmo") && TryU32(base, ctx.r3.u32, 0) == 0x3FBF5E43u) {
+    const float ts = TryF32(base, ctx.r3.u32 + 0x10u);
+    char callers[64];
+    CallerChain(ctx, base, callers);
+    rex::audio_trace::line("SRPOST", "%08X	%.6f	%d	%d	%s", ctx.r3.u32, ts,
+                           static_cast<int32_t>(TryU32(base, ctx.r3.u32 + 0x14u, 0)),
+                           ts > 0 ? static_cast<int>(1.0f / ts + 0.5f) : -1, callers);
+  }
   if (On("audiox")) {
     static std::mutex mutex;
     static std::unordered_map<uint32_t, std::pair<uint64_t, uint32_t>> seen;

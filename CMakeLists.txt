@@ -251,6 +251,9 @@ set(SKATE3_COMMON_SOURCES
     src/research/hooks_pedstuck.cpp
     src/research/hooks_pairtable.cpp
     src/research/hooks_replay.cpp
+    src/research/hooks_slowmo.cpp
+    src/research/hooks_minimapmode.cpp
+    src/research/hooks_marquee.cpp
     src/research/hooks_wheelc.cpp
     src/research/hooks_dmorows.cpp
     src/research/hooks_traffic.cpp
