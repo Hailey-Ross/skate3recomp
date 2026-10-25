@@ -201,3 +201,34 @@ extern "C" REX_FUNC(sub_82672118) {
     }
   }
 }
+
+// The replay editor camera's per-frame resolve sub_82C8C470 (from 82C8B9F8, the 82C8A960 tick; b611): raw arguments
+// and the 3 floats at r3 after the call. Logged when the caller's argument set changes, and once a second.
+//   RCAMP <ms> lr | r3 | r4 | r5 | r6 | r7 | r8 | r9 | r10 | f1 | [r3] xyz after
+CallCounter g_c8c470{"82C8C470"};
+std::atomic<uint64_t> g_rcamp_at{0};
+std::atomic<uint64_t> g_rcamp_hash{0};
+
+extern "C" REX_FUNC(sub_82C8C470) {
+  const bool on = On("replay");
+  const uint32_t a[8] = {ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
+  const uint32_t ret = static_cast<uint32_t>(ctx.lr);
+  const double f1 = ctx.f1.f64;
+  if (on) g_c8c470.Hit(ret);
+  __imp__sub_82C8C470(ctx, base);
+  if (on) {
+    uint64_t hash = ret;
+    for (int i = 2; i < 8; ++i) hash = hash * 1099511628211ull ^ a[i];
+    const uint64_t t = GetTickCount64();
+    const uint64_t last = g_rcamp_at.load();
+    const bool changed = hash != g_rcamp_hash.exchange(hash);
+    if ((changed && t - last >= 50) || t - last >= 1000) {
+      g_rcamp_at = t;
+      char out[64] = "-";
+      if (Plausible(a[0]))
+        std::snprintf(out, sizeof out, "%.4f %.4f %.4f", TryF32(base, a[0]), TryF32(base, a[0] + 4u), TryF32(base, a[0] + 8u));
+      rex::audio_trace::line("RCAMP", "%08X\t%08X\t%08X\t%08X\t%08X\t%08X\t%08X\t%08X\t%08X\t%.4f\t%s", ret, a[0], a[1], a[2],
+                             a[3], a[4], a[5], a[6], a[7], f1, out);
+    }
+  }
+}

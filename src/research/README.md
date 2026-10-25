@@ -49,7 +49,7 @@ hooks reference functions only by address and read fields by offset.
 | `hooks_menus.cpp` | `menus` | the Trick Guide's 3D demo camera while its set is loaded: the final camera matrix with the field of view, the camera element values and the camera player's element words per frame (TGCAM), the matrix before and after the placement steps, the track length written from each new clip (TGFIT), property 147 lookups (TGPROP), the per-element tangent setup at track start (TGTAN, TGE87) and the render location key (TGLOC) |
 | `hooks_pedstuck.cpp` | `pedstuck` | how a pedestrian that stands still gets moving again: the still timer's own obstacle (STILLOBS), the nav cut (NAVCUT), the path check (PATHOK), the re-request (PATHREQ) and the release (STILLREL) |
 | `hooks_pairtable.cpp` | `pairtable` | the collision-type bit table the world's pair jobs filter body pairs with, once per job and table (PAIRTBL), and each job input (PAIRIN) |
-| `hooks_replay.cpp` | `replay` | the replay recorder's frame commits per second (REPLAYREC), the replay camera target (CAMTGT), the camera system's camera record (CAMSYS, CAMSYSN) and the replay editor's camera frames (RCAMN call counts, RCAMF resolved frame, RCAMRAW raw camera matrix) |
+| `hooks_replay.cpp` | `replay` | the replay recorder's frame commits per second (REPLAYREC), the replay camera target (CAMTGT), the camera system's camera record (CAMSYS, CAMSYSN) and the replay editor's camera frames (RCAMN call counts, RCAMF resolved frame, RCAMRAW raw camera matrix, RCAMP the per-frame resolve 82C8C470) |
 | `sdk/rexglue-sdk-research.patch` | (none) | the SDK side (see below) |
 
 Each file's header comment documents its line kinds and fields.
