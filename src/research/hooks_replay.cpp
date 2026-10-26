@@ -232,3 +232,46 @@ extern "C" REX_FUNC(sub_82C8C470) {
     }
   }
 }
+
+// The replay camera constraint sub_82683680 (constraint object r3, camera r4; b615): it returns at once when the gate
+// byte 0x83037414 is 0. Logs the gate, the editor mode word [[0x83067084]+0x30], the returned corrected byte, the
+// object's +0x181 byte, the camera's translation row (+0x30) before / after and the object's position (+0x110).
+// Logged when gate / mode / result change, and twice a second.
+//   RCOLL <ms> lr | gate | mode | result | +0x181 | cam before | cam after | obj pos
+CallCounter g_c83680{"82683680"};
+std::atomic<uint64_t> g_rcoll_at{0};
+std::atomic<uint32_t> g_rcoll_key{0xFFFFFFFFu};
+
+extern "C" REX_FUNC(sub_82683680) {
+  const bool on = On("replay");
+  const uint32_t obj = ctx.r3.u32, cam = ctx.r4.u32, ret = static_cast<uint32_t>(ctx.lr);
+  char before[64] = "-";
+  uint32_t gate = 0, mode = 0xFFFFFFFFu;
+  if (on) {
+    g_c83680.Hit(ret);
+    gate = TryU32(base, 0x83037414u, 0) >> 24;
+    const uint32_t ed = TryU32(base, 0x83067084u, 0);
+    if (Plausible(ed)) mode = TryU32(base, ed + 0x30u, 0xFFFFFFFFu);
+    if (Plausible(cam)) Vec3Text(base, cam + 0x30u, before, sizeof before);
+  }
+  __imp__sub_82683680(ctx, base);
+  if (on) {
+    const uint32_t result = ctx.r3.u32 & 0xFFu;
+    const uint32_t key = (gate << 16) ^ (mode << 8) ^ result;
+    const uint64_t t = GetTickCount64();
+    const uint64_t last = g_rcoll_at.load();
+    const bool changed = key != g_rcoll_key.exchange(key);
+    if ((changed && t - last >= 20) || t - last >= 500) {
+      g_rcoll_at = t;
+      char after[64] = "-", pos[64] = "-";
+      uint32_t b181 = 0xFFu;
+      if (Plausible(cam)) Vec3Text(base, cam + 0x30u, after, sizeof after);
+      if (Plausible(obj)) {
+        Vec3Text(base, obj + 0x110u, pos, sizeof pos);
+        b181 = TryU32(base, obj + 0x180u, 0) >> 16 & 0xFFu;
+      }
+      rex::audio_trace::line("RCOLL", "%08X\t%u\t%d\t%u\t%u\t%s\t%s\t%s", ret, gate, static_cast<int>(mode), result, b181,
+                             before, after, pos);
+    }
+  }
+}
