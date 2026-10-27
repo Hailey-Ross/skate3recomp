@@ -258,6 +258,7 @@ set(SKATE3_COMMON_SOURCES
     src/research/hooks_dmorows.cpp
     src/research/hooks_traffic.cpp
     src/research/hooks_props.cpp
+    src/research/hooks_flee.cpp
     src/research/hooks_queue.cpp
     src/research/hooks_marker.cpp
     src/research/hooks_hud.cpp

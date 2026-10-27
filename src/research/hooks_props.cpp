@@ -57,7 +57,12 @@ extern "C" REX_FUNC(sub_82C530F0) {
   if (log) FirstPassLog("PROPKICK", "", skipped, e, ctx);
 }
 
+namespace skate3_research {
+void FleeDmoListeners(PPCContext& ctx, uint8_t* base, uint32_t self);  // hooks_flee.cpp
+}
+
 extern "C" REX_FUNC(sub_82C54618) {
+  FleeDmoListeners(ctx, base, ctx.r3.u32);
   if (!On("props")) {
     __imp__sub_82C54618(ctx, base);
     return;

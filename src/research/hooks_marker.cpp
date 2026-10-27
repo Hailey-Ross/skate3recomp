@@ -221,6 +221,16 @@ extern "C" REX_FUNC(sub_82B938D8) {
                            static_cast<int32_t>(TryU32(base, ctx.r3.u32 + 0x14u, 0)),
                            ts > 0 ? static_cast<int>(1.0f / ts + 0.5f) : -1, callers);
   }
+  // Peds fleeing from a pushed prop: the ped mood event post (id 0xF631C8F6; sub_8269D8A8 posts category 10 for a colliding ped).
+  // MOODPOST <ms> category | radius | instigator (2 words) | word +0x38 (2 words) | callers. Category flee / fleebeg.
+  if ((On("flee") || On("fleebeg")) && TryU32(base, ctx.r3.u32, 0) == 0xF631C8F6u) {
+    const uint32_t m = ctx.r3.u32;
+    char callers[64];
+    CallerChain(ctx, base, callers);
+    rex::audio_trace::line("MOODPOST", "%d\t%d\t%08X %08X\t%08X %08X\t%s", static_cast<int32_t>(TryU32(base, m + 0x10u)),
+                           static_cast<int32_t>(TryU32(base, m + 0x08u)), TryU32(base, m + 0x30u), TryU32(base, m + 0x34u),
+                           TryU32(base, m + 0x38u), TryU32(base, m + 0x3Cu), callers);
+  }
   if (On("audiox")) {
     static std::mutex mutex;
     static std::unordered_map<uint32_t, std::pair<uint64_t, uint32_t>> seen;
