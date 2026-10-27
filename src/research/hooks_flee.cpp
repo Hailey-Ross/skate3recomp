@@ -26,7 +26,8 @@ using namespace skate3_research;
 namespace {
 
 bool Ptr(uint32_t p) { return p != 0xFFFFFFFFu && Plausible(p); }
-// "flee" arms every group; fleescat / fleex / fleebeg / fleedmo arm one group each (bisecting a crash).
+// "flee" arms every group except fleex; fleescat / fleebeg / fleedmo arm one group each. fleex (the X record
+// probes) crashes the boot while loading, so it only runs when named.
 bool FleeOn(const char* group) { return On("flee") || On(group); }
 uint32_t U8(uint8_t* base, uint32_t a) { return Readable(base, a, 1) ? base[a] : 0xFFFFFFFFu; }
 uint32_t Follow(uint8_t* base, uint32_t ptr, uint32_t offset) {
@@ -130,7 +131,7 @@ void XWriteCheck(PPCContext& ctx, uint8_t* base, uint32_t fn, uint32_t x, const 
 }  // namespace
 
 extern "C" REX_FUNC(sub_82595FA8) {
-  static const bool on = FleeOn("fleex");
+  static const bool on = On("fleex");
   if (on) {
     const uint32_t x = ctx.r3.u32, t = ctx.r4.u32;
     uint8_t v[6];
@@ -170,7 +171,7 @@ extern "C" REX_FUNC(sub_82595FA8) {
 // The X vtable methods at 0x823006A0..0x823006F4 (b637 section 6 item 3; the XVT row checks the slots at runtime).
 #define X_PROBE(addr)                                                     \
   extern "C" REX_FUNC(sub_##addr) {                                       \
-    static const bool on = FleeOn("fleex");                                    \
+    static const bool on = On("fleex");                                    \
     const uint32_t x = ctx.r3.u32;                                        \
     const uint64_t lr = ctx.lr;                                           \
     uint8_t before[6];                                                    \
