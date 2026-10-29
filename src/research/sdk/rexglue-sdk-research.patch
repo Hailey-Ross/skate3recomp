@@ -533,18 +533,10 @@ index 0000000..9726bc9
 +
 +}  // namespace rex::input_script
 diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
-index 3b060a9..d1b56f9 100644
+index 36f8b08..47db061 100644
 --- a/include/rex/input/input_system.h
 +++ b/include/rex/input/input_system.h
-@@ -12,6 +12,7 @@
- 
- #include <memory>
- #include <functional>
-+#include <mutex>
- #include <vector>
- 
- #include <rex/input/input.h>
-@@ -49,6 +50,14 @@ class InputSystem : public system::IInputSystem {
+@@ -50,6 +50,14 @@ class InputSystem : public system::IInputSystem {
    X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
    X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags, X_INPUT_KEYSTROKE* out_keystroke);
  
@@ -559,17 +551,17 @@ index 3b060a9..d1b56f9 100644
   private:
    rex::ui::Window* window_ = nullptr;
  
-@@ -56,6 +65,8 @@ class InputSystem : public system::IInputSystem {
-   std::function<bool()> active_callback_ = nullptr;
-   std::function<void()> menu_chord_callback_ = nullptr;
-   bool menu_chord_down_ = false;
+@@ -60,6 +68,8 @@ class InputSystem : public system::IInputSystem {
+   // Guest threads poll and rumble concurrently; held through each request. Recursive because the
+   // chord / active callbacks run inside GetState (skate2-recompile-pc input-synchronization).
+   std::recursive_mutex poll_mutex_;
 +  std::mutex guest_pad_observer_mutex_;
 +  GuestPadObserver guest_pad_observer_ = nullptr;
  };
  
  /// Create a default InputSystem with SDL + NOP drivers.
 diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
-index 0e7cfce..5e5be73 100644
+index 56963d0..b7e26fe 100644
 --- a/src/audio/sdl/sdl_audio_driver.cpp
 +++ b/src/audio/sdl/sdl_audio_driver.cpp
 @@ -12,10 +12,13 @@
@@ -586,7 +578,7 @@ index 0e7cfce..5e5be73 100644
  #include <rex/audio/conversion.h>
  #include <rex/audio/flags.h>
  #include <rex/audio/sdl/sdl_audio_driver.h>
-@@ -288,6 +291,26 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
+@@ -312,6 +315,26 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream, int ad
        }
        additional_amount -= len;
      } else {
@@ -673,7 +665,7 @@ index 98734ba..33aae16 100644
    if (!data->output_buffer_block_count) {
      REXAPU_ERROR("XmaContext {} old: output_buffer_block_count is 0", id());
 diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
-index a1f41cc..f91332e 100644
+index cb11bb4..a5ddf2f 100644
 --- a/src/input/input_system.cpp
 +++ b/src/input/input_system.cpp
 @@ -140,6 +140,18 @@ void InputSystem::SetMenuChordCallback(std::function<void()> callback) {
@@ -694,7 +686,7 @@ index a1f41cc..f91332e 100644
 +
  X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                        X_INPUT_CAPABILITIES* out_caps) {
-   SCOPE_profile_cpu_f("hid");
+   std::lock_guard<std::recursive_mutex> poll_guard(poll_mutex_);
 diff --git a/src/kernel/xam/xam_input.cpp b/src/kernel/xam/xam_input.cpp
 index caa3538..f6170df 100644
 --- a/src/kernel/xam/xam_input.cpp

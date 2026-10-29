@@ -90,6 +90,14 @@ The trace's first line is `CLOCK 0.0 <unix ms>`, which aligns trace time with wa
 
 ## SDK patch
 
+On this branch `third_party/rexglue-sdk` points at branch `skate3-fixes` of
+[Hailey-Ross/rexglue-sdk](https://github.com/Hailey-Ross/rexglue-sdk/tree/skate3-fixes): the Skate 3 SDK
+(mchughalex/rexglue-skate3) plus rexglue-sdk fixes #370 (manual switch tables, for manual tables only so
+existing generated code stays the same), #371 (DLL code_base) and #403 (audio timer resolution), and fixes
+ported from [skate2-recompile-pc](https://github.com/christianortel/skate2-recompile-pc) (vertex buffer
+coherency, serialised guest input, selectable audio output device, TOML string escaping, float16_4 pack
+through a temp). Regenerate the code after switching SDKs (`generate-all`).
+
 `sdk/rexglue-sdk-research.patch` applies to `third_party/rexglue-sdk` (`git apply`, from that directory). It
 adds the trace writer (`include/rex/audio/audio_trace.h`), scripted/recorded pad input
 (`include/rex/input/input_script.h`), trace points for file reads, XMA decoding and the audio output, and the
