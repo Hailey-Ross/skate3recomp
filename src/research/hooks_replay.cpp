@@ -124,6 +124,8 @@ void CamSysTrace(PPCContext& ctx, uint8_t* base) {
 //   RCAMN <ms> function | calls in the last second | up to 4 lr:count
 // and for the frame resolver sub_82C84CF8(take, &m, space, id), once a second, the frame it returned:
 //   RCAMF <ms> lr | space | id | row0 xyz | row1 xyz | row2 xyz | row3 xyz
+// and the take it was given (r3), once a second (b465: does a base-game B commit on an empty lane write the take?):
+//   RTAKE <ms> take | +0x74 word / float | channels 0, 4, 5: (u16 +0x22C, u16 +0x22E) | live TIME_SCALE (element 0x19)
 namespace {
 struct CallCounter {
   const char* name;
@@ -155,11 +157,16 @@ struct CallCounter {
 };
 CallCounter g_c84cf8{"82C84CF8"}, g_c82a50{"82C82A50"}, g_c72118{"82672118"};
 std::atomic<uint64_t> g_rcamf_at{0};
+std::atomic<uint64_t> g_rtake_at{0};
+uint32_t TakeU16(uint8_t* base, uint32_t addr) {
+  const uint32_t w = TryU32(base, addr & ~3u);
+  return (addr & 2u) ? (w & 0xFFFFu) : (w >> 16);
+}
 }  // namespace
 
 extern "C" REX_FUNC(sub_82C84CF8) {
   const bool on = On("replay");
-  const uint32_t m = ctx.r4.u32, space = ctx.r5.u32, id = ctx.r6.u32, ret = static_cast<uint32_t>(ctx.lr);
+  const uint32_t take = ctx.r3.u32, m = ctx.r4.u32, space = ctx.r5.u32, id = ctx.r6.u32, ret = static_cast<uint32_t>(ctx.lr);
   if (on) g_c84cf8.Hit(ret);
   __imp__sub_82C84CF8(ctx, base);
   if (on) {
@@ -171,6 +178,16 @@ extern "C" REX_FUNC(sub_82C84CF8) {
         std::snprintf(r[i], sizeof r[i], "%.4f %.4f %.4f", TryF32(base, m + i * 16u), TryF32(base, m + i * 16u + 4u),
                       TryF32(base, m + i * 16u + 8u));
       rex::audio_trace::line("RCAMF", "%08X\t%u\t%u\t%s\t%s\t%s\t%s", ret, space, id, r[0], r[1], r[2], r[3]);
+    }
+    uint64_t lt = g_rtake_at.load();
+    if (t - lt >= 1000 && g_rtake_at.compare_exchange_strong(lt, t) && Plausible(take)) {
+      char ch[3][24];
+      const uint32_t chans[3] = {0, 4, 5};
+      for (int i = 0; i < 3; ++i)
+        std::snprintf(ch[i], sizeof ch[i], "%u:%u,%u", chans[i], TakeU16(base, take + 0x22Cu + chans[i] * 0x10u),
+                      TakeU16(base, take + 0x22Eu + chans[i] * 0x10u));
+      rex::audio_trace::line("RTAKE", "%08X\t%08X %.3f\t%s %s %s\t%.3f", take, TryU32(base, take + 0x74u),
+                             TryF32(base, take + 0x74u), ch[0], ch[1], ch[2], TryF32(base, 0x830C1640u + 0x19u * 0xCu + 4u));
     }
   }
 }

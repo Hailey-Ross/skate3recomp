@@ -55,6 +55,9 @@ one file.
 | Junctions: light phases per signal controller, the light each approach uses, turn choices | `traffic` (TRAFPROG, TRAFLIGHT2, VEHJUNC, VEHCONN) |
 | Skitching (grab, hold, release, the car's speed and the skater's offset) and skater-vs-car contacts and bails | `skitch` (with `traffic` for the cars' driving state) |
 | Dynamic props (cones, benches): what touches them and what wakes them | `props` |
+| Pedestrian movement settings, speeds, steering and avoider masks | `pedmove` (named only; not part of an unset list) |
+| An NPC skater's bail: fade, placement, removals | `npcbail` (named only) |
+| The line test of an NPC skater's line search | `npcline` (named only) |
 | Any memory you name in a file (see section 5) | `watch` |
 
 `dsp`, `dspmod` and `audiox` add hundreds to thousands of lines a second. Keep those runs short (one or two
