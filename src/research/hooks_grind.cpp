@@ -28,6 +28,8 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
+#include <cstdio>
 #include <unordered_map>
 
 using namespace skate3_research;
@@ -177,6 +179,31 @@ extern "C" REX_FUNC(sub_82D8A828) {
   const uint32_t p = TryU32(base, m, 0);
   if (!Plausible(p) || !Readable(base, p, 2520)) return;
   const uint32_t s = LoadU32(base, p + 2508);
+  // GRAIR <ms> p | 2508 | 2512 | +64 | +80 | +96 | +112 | +400: an airborne skater inside SKATE3_GRIND_BOX (its matrix).
+  if (LoadU32(base, p + 2512) == 200) {
+    static float box[4];
+    static const bool has_box = [] {
+      const char* e = std::getenv("SKATE3_GRIND_BOX");
+      return e && std::sscanf(e, "%f %f %f %f", &box[0], &box[1], &box[2], &box[3]) == 4;
+    }();
+    const auto f = [&](uint32_t at) {
+      uint32_t bits = LoadU32(base, at);
+      float v;
+      std::memcpy(&v, &bits, 4);
+      return v;
+    };
+    const float x = f(p + 112), z = f(p + 120);
+    if (has_box && x >= box[0] && x <= box[1] && z >= box[2] && z <= box[3]) {
+      char a[64], b[64], c[64], d[64], e[64];
+      Vec3Text(base, p + 64, a, sizeof a);
+      Vec3Text(base, p + 80, b, sizeof b);
+      Vec3Text(base, p + 96, c, sizeof c);
+      Vec3Text(base, p + 112, d, sizeof d);
+      Vec3Text(base, p + 400, e, sizeof e);
+      rex::audio_trace::line("GRAIR", "%08X	%d	%d	%s	%s	%s	%s	%s", p, static_cast<int>(s),
+                             static_cast<int>(LoadU32(base, p + 2512)), a, b, c, d, e);
+    }
+  }
   char why;
   {
     std::lock_guard<std::mutex> lock(g_grind_mutex);
