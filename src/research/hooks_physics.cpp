@@ -375,3 +375,37 @@ extern "C" REX_FUNC(sub_82BA7310) {
   }
   rex::audio_trace::line("BUMPQ", "%08X\t%u\t%u", owner, result, after);
 }
+
+// AIPULL (category aiskater, 2026-11-03): the NPC skater board path's velocity step sub_82C05868 (called by the board
+// path sub_82C05EC0 when the record's velocity bit 0x10000000 is set): r3 = the NPC skater's board object, r4 -> the target
+// velocity, f1 / f2 = gain and per-tick cap. It moves the deck body's linear velocity
+// ([[[[r3+0xC]+0x18]+8]+0x28C]+0x20) toward the target. Logged when the deck is more than 1.5 m/s off the target
+// (the engine's NPC_BOARD_PULL uses the same filter), at most 200 lines a second; consecutive lines of one object show
+// how much of the step the next tick keeps.
+//   AIPULL <ms> object | target before after (m/s) | gain cap
+extern "C" REX_FUNC(sub_82C05868) {
+  const bool on = On("aiskater");
+  const uint32_t object = ctx.r3.u32, target = ctx.r4.u32 & 0xFFFFFFF0u;
+  const double gain = ctx.f1.f64, cap = ctx.f2.f64;
+  uint32_t velocity = 0;
+  if (on) {
+    const uint32_t a = TryU32(base, object + 0xC, 0);
+    const uint32_t b = a ? TryU32(base, a + 0x18, 0) : 0;
+    const uint32_t c = b ? TryU32(base, b + 8, 0) : 0;
+    const uint32_t body = c ? TryU32(base, c + 0x28C, 0) : 0;
+    velocity = body ? ((body + 0x20) & 0xFFFFFFF0u) : 0;
+  }
+  auto speed = [&](uint32_t at) {
+    const float x = TryF32(base, at), y = TryF32(base, at + 4), z = TryF32(base, at + 8);
+    return std::sqrt(double(x) * x + double(y) * y + double(z) * z);
+  };
+  const double before = velocity ? speed(velocity) : NAN, goal = (on && target) ? speed(target) : NAN;
+  __imp__sub_82C05868(ctx, base);
+  if (!on || !velocity || std::isnan(before) || std::isnan(goal) || std::fabs(before - goal) <= 1.5) return;
+  static uint64_t second = 0;
+  static uint32_t count = 0;
+  const uint64_t now = GetTickCount64();
+  if (now / 1000 != second) { second = now / 1000; count = 0; }
+  if (++count > 200) return;
+  rex::audio_trace::line("AIPULL", "%08X\t%.3f %.3f %.3f\t%.3f %.3f", object, goal, before, speed(velocity), gain, cap);
+}
