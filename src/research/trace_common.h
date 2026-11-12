@@ -152,7 +152,10 @@ inline bool On(const char* category) {
     t.list = std::string(",") + (v ? v : "") + ",";
     t.all = !v || !*v;
     for (int i = 0; i < kCount; ++i) {
-      t.on[i] = t.all || t.list.find(std::string(",") + kKnown[i] + ",") != std::string::npos;
+      // "All" (unset / empty) never arms fleex: its hooks crash the boot at the press-start screen (2026-10-26,
+      // again 2026-11-11 for every run without a category list). Naming it still arms it.
+      const bool unsafe_in_all = std::strcmp(kKnown[i], "fleex") == 0;
+      t.on[i] = (t.all && !unsafe_in_all) || t.list.find(std::string(",") + kKnown[i] + ",") != std::string::npos;
     }
     return t;
   }();
